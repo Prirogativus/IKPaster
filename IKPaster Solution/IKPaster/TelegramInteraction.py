@@ -2,7 +2,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, Updater
 
 
-token = "8178145378:AAHRbZgao9Iiyz-Wq56CH3__T-bbcySMrtI"
+token = ""
 
 FIRST_QUESTION, SECOND_QUESTION = range(2)
 user_answers = {}
