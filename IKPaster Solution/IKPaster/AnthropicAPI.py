@@ -4,7 +4,7 @@ import os
 api_key = ""
 aimodel = anthropic.Anthropic(api_key=api_key)
 
-message = aimodel.messages.create(
+"""message = aimodel.messages.create(
     model="claude-3-7-sonnet-20250219",
     max_tokens=1000,
     temperature=1,
@@ -21,4 +21,4 @@ message = aimodel.messages.create(
         }
     ]
 )
-print(message.content)
+print(message.content)"""
