@@ -31,8 +31,8 @@ class HardResetScraper:
         
         # Initialize attributes
         self.driver = None
-        self.example_model = self.telegram_bot.example_model
-        self.target_model = self.telegram_bot.target_model
+        self.example_model = "HUAWEI Mate 60 Pro" #self.telegram_bot.example_model
+        self.target_model = "HUAWEI Mate 70 Pro Premium"#self.telegram_bot.target_model
         self.example_descriptions = {}
         self.target_descriptions = {}
         
@@ -50,6 +50,7 @@ class HardResetScraper:
             "search_field": (By.XPATH, "/html/body/div/div[3]/div/div/div[1]/form/div/input[1]"),
             "search_button": (By.XPATH, "/html/body/div/div[3]/div/div/div[1]/form/div/input[2]"),
             "other_desc_btn": (By.XPATH, "/html/body/div/div[3]/div/ul/li[1]/a"),
+            "source_button": (By.XPATH, "/html/body/div[1]/div[3]/div/form/div/fieldset/div[6]/div/div[1]/div/span[1]/span[2]/span[10]/span[3]/a[1]"),
             "table": (By.CSS_SELECTOR, "table"),
             "table_rows": (By.CSS_SELECTOR, "tbody tr"),
             "table_cells": (By.CSS_SELECTOR, "td")
@@ -139,35 +140,40 @@ class HardResetScraper:
             return False
     
     def extract_reset_descriptions(self):
-        """
-        Extract 'Other name' column values into a dictionary as keys and store the clickable elements.
-        Returns: Dictionary with 'Other name' as keys and corresponding clickable elements as values
-        """
         try:
             # Wait for the table to load
-            self.wait_for_element(self.locators["table"])
-            
-            # Extract all rows from the table (excluding header row)
-            rows = self.driver.find_elements(*self.locators["table_rows"])
+            self.wait_for_element((By.XPATH, "//table"))
             
             reset_descriptions = {}
+            row_index = 1
             
-            # Loop through each row to extract data
-            for row in rows:
-                # Get all columns in the row
-                columns = row.find_elements(*self.locators["table_cells"])
-                
-                # Check for the "Other name" column (adjust index if needed)
-                if len(columns) > 3:
-                    other_name = columns[2].text.strip()
+            # Continue until we don't find any more rows
+            while True:
+                try:
+                    # Use the specific XPath pattern with increasing row index
+                    link_xpath = f"/html/body/div/div[3]/div/div/form/div/table/tbody/tr[{row_index}]/th/a"
+                    
+                    # Find the link element directly
+                    link_element = self.driver.find_element(By.XPATH, link_xpath)
+                    
+                    # Get the text from the link (this is our "Other name")
+                    other_name = link_element.text.strip()
                     
                     if other_name:
-                        # Find the link element within the "Other name" column
-                        link_elements = columns[2].find_elements(By.TAG_NAME, "a")
-                        link_element = link_elements[0] if link_elements else None
-                        
                         # Store the element with the other_name as key
                         reset_descriptions[other_name] = link_element
+                        logger.info(f"Found reset description: {other_name}")
+                    
+                    # Increment row index for the next iteration
+                    row_index += 1
+                    
+                except NoSuchElementException:
+                    # No more rows found, break the loop
+                    break
+                except Exception as e:
+                    # Log any other error and continue to the next row
+                    logger.error(f"Error extracting row {row_index}: {e}")
+                    row_index += 1
             
             logger.info(f"Extracted {len(reset_descriptions)} reset descriptions")
             return reset_descriptions
@@ -175,6 +181,25 @@ class HardResetScraper:
             logger.error(f"Error extracting reset descriptions: {e}")
             return {}
     
+    def extract_textarea_content(self):
+        try:
+            # First find the iframe (CKEditor uses iframes for the editable area)
+            iframe = self.driver.find_element(By.CSS_SELECTOR, ".cke_wysiwyg_frame")
+            
+            # Switch to the iframe context
+            self.driver.switch_to.frame(iframe)
+            
+            # Now we can access the content
+            content = self.driver.find_element(By.TAG_NAME, "body").get_attribute("innerHTML")
+            
+            # Switch back to the main document
+            self.driver.switch_to.default_content()
+            
+            return content
+        except Exception as e:
+            logger.error(f"Error extracting textarea content: {e}")
+            return ""  # Return empty string instead of None to avoid type errors
+
     def click_reset_description(self, descriptions_dict, name_to_click):
         """Click on a reset description by name"""
         try:
@@ -187,6 +212,25 @@ class HardResetScraper:
                 return False
         except Exception as e:
             logger.error(f"Error clicking reset description '{name_to_click}': {e}")
+            return False
+        
+    def go_back(self):
+        """
+        Navigate back to the previous page in the browser history
+        """
+        try:
+            self.driver.back()
+            logger.info("Navigated back to the previous page")
+            
+            
+
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "body"))
+            )
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error navigating back: {e}")
             return False
     
     def get_example_content(self):
@@ -213,11 +257,17 @@ class HardResetScraper:
                 self.example_descriptions = self.extract_reset_descriptions()
                 
                 # Click on "Hard Reset" if it exists
-                if "Hard Reset" in self.example_descriptions:
-                    self.click_reset_description(self.example_descriptions, "Hard Reset")
-                    return True
-                else:
-                    logger.warning("'Hard Reset' description not found")
+                for description in self.example_descriptions:
+                    self.click_reset_description(self.example_descriptions, description)
+                    self.wait_for_element((By.XPATH, self.locators["source_button"]))
+                    self.click_element(self.locators["source_button"])
+                    self.wait_for_element(By.XPATH, "/html/body/div[1]/div[3]/div/form/div/fieldset/div[6]/div/div[1]/div/div/textarea")
+                    try:
+                        self.example_descriptions[description] = self.extract_textarea_content()
+                        logger.error("Text copy: Succes")
+                    except:
+                        logger.error("Text copy: Failure")
+                    self.go_back()
             else:
                 logger.error(f"Device link for '{self.example_model}' not found")
             
@@ -225,6 +275,7 @@ class HardResetScraper:
         except Exception as e:
             logger.error(f"Error getting example content: {e}")
             return False
+        
     
     def run(self):
         """Main execution method"""
@@ -243,6 +294,7 @@ class HardResetScraper:
             # Ensure driver is quit properly
             if self.driver:
                 logger.info("Closing WebDriver")
+                time.sleep(100)
                 self.driver.quit()
 
 
