@@ -1,8 +1,9 @@
 import anthropic
 import os
-import Program
+import DataExtractor
+import ContentPublisher
 
-program = Program
+publisher = ContentPublisher
 API_KEY = ""
 aimodel = anthropic.Anthropic(api_key=API_KEY)
 sys_prompt = """You are an expert at reformatting device instruction content. For each set of instructions provided, you must:
@@ -44,25 +45,27 @@ sys_prompt = """You are an expert at reformatting device instruction content. Fo
 
 Provide the complete reformatted HTML in a single code block that can be copied directly for website implementation. The code should be ready to paste without requiring modifications."""
 
+def get_target_text():
 
-"""for n in program.example_descriptions: 
-  input_text = program.example_descriptions[n]
-
-  message = aimodel.messages.create(
-    model="claude-3-7-sonnet-20250219",
-    max_tokens=2000,
-    temperature=0.4,
-    system=sys_prompt,
-    messages=[
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": input_text
-                }
-            ]
-        }
-    ]
-  )
-  program.target_descriptions[n] = message"""
+  data = DataExtractor.DataExtractorClass()
+  
+  for key in data.example_descriptions:
+      input_text = data.example_descriptions[key]
+      message = aimodel.messages.create(
+          model="claude-3-7-sonnet-20250219",
+          max_tokens=2000,
+          temperature=0.4,
+          system=sys_prompt,
+          messages=[
+              {
+                  "role": "user",
+                  "content": [
+                      {
+                          "type": "text",
+                          "text": input_text
+                      }
+                  ]
+              }
+          ]
+      )
+      publisher.target_descriptions[key] = message
