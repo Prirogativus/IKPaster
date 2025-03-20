@@ -9,7 +9,6 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 import time
 import logging
 import TelegramInteraction
-import AnthropicAPI
 
 # Setup logging
 logging.basicConfig(
@@ -27,11 +26,9 @@ class DataExtractorClass:
         self.username = username
         self.password = password
         self.telegram_bot = TelegramInteraction
-        self.ai_model = AnthropicAPI
         
         # Initialize attributes
         self.driver = None
-        self.example_model = "HUAWEI Mate 60 Pro" #self.telegram_bot.example_model
         self.example_descriptions = {}
         
         # URLs and element locators - centralized for easy updates
@@ -108,12 +105,118 @@ class DataExtractorClass:
         return False
     
     def find_device_link(self, device_name):
-        """Find a clickable link containing the device name"""
+        """Find and click the device link in the search results table"""
         try:
-            xpath = f"//a[contains(text(), '{device_name}')]"
-            return self.wait_for_clickable((By.XPATH, xpath))
+            logger.info(f"Looking for device link for: '{device_name}'")
+            
+            # Take a screenshot to help with debugging
+            self.driver.save_screenshot(f"search_results_page_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            
+            # Wait for the table to load
+            table = self.wait_for_element((By.TAG_NAME, "table"), timeout=10)
+            if not table:
+                logger.error("Table not found on page")
+                return None
+                
+            # First try the specific link in the first column of the table
+            # This targets the "RESET INFO" column which has the blue link
+            specific_xpath = "//table//tr/td[1]/a"
+            try:
+                links = self.driver.find_elements(By.XPATH, specific_xpath)
+                logger.info(f"Found {len(links)} links in first column")
+                
+                for link in links:
+                    link_text = link.text.strip()
+                    logger.info(f"Link text: '{link_text}'")
+                    
+                    # Check for exact match (case insensitive)
+                    if link_text.lower() == device_name.lower():
+                        logger.info(f"Found exact match for '{device_name}'")
+                        return link
+                        
+                    # Check for partial match as fallback
+                    if device_name.lower() in link_text.lower():
+                        logger.info(f"Found partial match: '{link_text}' for '{device_name}'")
+                        return link
+            except Exception as e:
+                logger.info(f"Error finding first column links: {e}")
+            
+            # If that didn't work, try the RESET INFO column
+            reset_info_xpath = "//table//tr/th[@class='field-reset_info']/a"
+            try:
+                reset_links = self.driver.find_elements(By.XPATH, reset_info_xpath)
+                logger.info(f"Found {len(reset_links)} links in RESET INFO column")
+                
+                for link in reset_links:
+                    link_text = link.text.strip()
+                    logger.info(f"RESET INFO link text: '{link_text}'")
+                    
+                    if device_name.lower() in link_text.lower():
+                        logger.info(f"Found match in RESET INFO column: '{link_text}'")
+                        return link
+            except Exception as e:
+                logger.info(f"Error finding RESET INFO links: {e}")
+            
+            # If still not found, try a very specific XPath based on the table structure in your screenshots
+            # This targets the blue "AZUMI V4" link in the first column
+            very_specific_xpath = "//table//tr/th/a"
+            try:
+                header_links = self.driver.find_elements(By.XPATH, very_specific_xpath)
+                logger.info(f"Found {len(header_links)} links in table headers")
+                
+                for link in header_links:
+                    link_text = link.text.strip()
+                    logger.info(f"Header link text: '{link_text}'")
+                    
+                    if device_name.lower() in link_text.lower():
+                        logger.info(f"Found match in header: '{link_text}'")
+                        return link
+            except Exception as e:
+                logger.info(f"Error finding header links: {e}")
+            
+            # If we've tried all specific approaches and nothing worked,
+            # fall back to a more general approach
+            try:
+                all_links = self.driver.find_elements(By.TAG_NAME, "a")
+                logger.info(f"Searching through all {len(all_links)} links on page")
+                
+                for link in all_links:
+                    try:
+                        link_text = link.text.strip()
+                        if link_text and device_name.lower() in link_text.lower():
+                            logger.info(f"Found link with matching text: '{link_text}'")
+                            return link
+                    except:
+                        continue
+            except Exception as e:
+                logger.error(f"Error in general link search: {e}")
+            
+            # Direct JavaScript approach as absolute last resort
+            logger.info("Trying JavaScript approach to find the link")
+            script = f"""
+                var deviceName = "{device_name.lower()}";
+                var links = document.getElementsByTagName('a');
+                for(var i=0; i<links.length; i++) {{
+                    if(links[i].innerText.toLowerCase().includes(deviceName)) {{
+                        return links[i];
+                    }}
+                }}
+                return null;
+            """
+            
+            element = self.driver.execute_script(script)
+            if element:
+                logger.info(f"Found link via JavaScript: {element.text}")
+                return element
+                
+            # If we get here, we couldn't find the link
+            logger.error(f"Could not find any link containing '{device_name}'")
+            self.driver.save_screenshot(f"device_link_not_found_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            return None
+            
         except Exception as e:
-            logger.error(f"Error finding device link for '{device_name}': {e}")
+            logger.error(f"Error in find_device_link: {e}")
+            self.driver.save_screenshot(f"find_device_link_error_{time.strftime('%Y%m%d-%H%M%S')}.png")
             return None
     
     def authenticate(self):
@@ -179,25 +282,6 @@ class DataExtractorClass:
             logger.error(f"Error extracting reset descriptions: {e}")
             return {}
     
-    """def extract_textarea_content(self):
-        try:
-            # First find the iframe (CKEditor uses iframes for the editable area)
-            iframe = self.driver.find_element(By.CSS_SELECTOR, ".cke_wysiwyg_frame")
-            
-            # Switch to the iframe context
-            self.driver.switch_to.frame(iframe)
-            
-            # Now we can access the content
-            content = self.driver.find_element(By.TAG_NAME, "body").get_attribute("innerHTML")
-            
-            # Switch back to the main document
-            self.driver.switch_to.default_content()
-            
-            return content
-        except Exception as e:
-            logger.error(f"Error extracting textarea content: {e}")
-            return ""  # Return empty string instead of None to avoid type errors" """
-
     def click_reset_description(self, descriptions_dict, name_to_click):
         """Click on a reset description by name"""
         try:
@@ -220,8 +304,6 @@ class DataExtractorClass:
             self.driver.back()
             logger.info("Navigated back to the previous page")
             
-            
-
             WebDriverWait(self.driver, 10).until(
                 EC.presence_of_element_located((By.TAG_NAME, "body"))
             )
@@ -281,7 +363,6 @@ class DataExtractorClass:
         
         return content
     
-
     def click_source_button(self):
         """Click the Source button in CKEditor toolbar"""
         try:
@@ -334,27 +415,51 @@ class DataExtractorClass:
                 
             return False
 
+    def wait_for_example_model(self, timeout=300, check_interval=5):
+        """
+        Wait until example_model is available from TelegramInteraction.
+        Timeout after the specified duration (in seconds).
+        """
+        start_time = time.time()
+        logger.info("Waiting for example_model from Telegram...")
+        
+        while time.time() - start_time < timeout:
+            # Check if example_model is set and not empty
+            if hasattr(self.telegram_bot, 'example_model') and self.telegram_bot.example_model:
+                example_model = self.telegram_bot.example_model
+                logger.info(f"Received example_model: {example_model}")
+                return example_model
+            
+            # Log waiting status periodically
+            if (time.time() - start_time) % 30 < check_interval:
+                logger.info(f"Still waiting for example_model... ({int(time.time() - start_time)} seconds elapsed)")
+                
+            # Wait before checking again
+            time.sleep(check_interval)
+        
+        logger.error(f"Timed out waiting for example_model after {timeout} seconds")
+        return None
 
-    def get_example_content(self):
+    def get_example_content(self, example_model):
         """Search for example model and get its content"""
         try:
-            logger.info(f"Getting content for example model: {self.example_model}")
+            logger.info(f"Getting content for example model: {example_model}")
             
             # Navigate to reset info page
             self.driver.get(self.urls["reset_info"])
             
             # Search for the example model
-            self.fill_text_field(self.locators["search_field"], self.example_model)
+            self.fill_text_field(self.locators["search_field"], example_model)
             self.click_element(self.locators["search_button"])
             
             # Find and click the device link
-            device_link = self.find_device_link(self.example_model)
+            device_link = self.find_device_link(example_model)
             if not device_link:
-                logger.error(f"Device link for '{self.example_model}' not found")
+                logger.error(f"Device link for '{example_model}' not found")
                 return False
                 
             device_link.click()
-            logger.info(f"Clicked on device link for '{self.example_model}'")
+            logger.info(f"Clicked on device link for '{example_model}'")
             
             # Click on the "Other Description" button
             if not self.click_element(self.locators["other_desc_btn"]):
@@ -518,7 +623,7 @@ class DataExtractorClass:
                     except:
                         # If going back fails, try to navigate directly to the other description page
                         self.driver.get(self.urls["other_descriptions"])
-                        self.fill_text_field(self.locators["search_field"], self.example_model)
+                        self.fill_text_field(self.locators["search_field"], example_model)
                         self.click_element(self.locators["search_button"])
             
             # Store the content dictionary
@@ -531,16 +636,29 @@ class DataExtractorClass:
             logger.error(f"Error in get_example_content: {e}")
             return False
         
-    
     def run(self):
         """Main execution method"""
         try:
             self.setup_driver()
             
             if self.authenticate():
-                self.get_example_content()
-                # Additional methods can be called here
+                # Wait for example_model from TelegramInteraction
+                example_model = self.wait_for_example_model()
                 
+                if example_model:
+                    # Process the model
+                    success = self.get_example_content(example_model)
+                    
+                    # Store results in TelegramInteraction if needed
+                    if success and self.example_descriptions:
+                        # You might want to store this somewhere in TelegramInteraction
+                        self.telegram_bot.target_descriptions = self.example_descriptions
+                    
+                    # Clear the example_model in TelegramInteraction when done
+                    logger.info(f"Clearing example_model {example_model} from TelegramInteraction")
+                    self.telegram_bot.example_model = None
+                else:
+                    logger.error("No example_model received from TelegramInteraction")
             else:
                 logger.error("Could not proceed due to authentication failure")
         except Exception as e:

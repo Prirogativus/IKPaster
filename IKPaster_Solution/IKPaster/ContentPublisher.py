@@ -3,12 +3,13 @@ import logging
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
+from selenium.webdriver.common.keys import Keys
+import TelegramInteraction
 
-# Setup logging
+# Set up logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -19,50 +20,64 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# URLs - modify these if the admin URLs change
+URLS = {
+    "login": "https://www.hardreset.info/admin/",
+    "add_description": "https://www.hardreset.info/admin/reset/otherdescription/add/"
+}
+
+# Element IDs and selectors - modify these if the website structure changes
+ELEMENTS = {
+    "username_field": (By.ID, "id_username"),
+    "password_field": (By.ID, "id_password"),
+    "login_button": (By.XPATH, "//input[@value='Log in']"),
+    "other_name_dropdown": (By.ID, "id_other_name"),
+    "reset_info_dropdown": (By.ID, "id_reset_info"),
+    "source_button": (By.CSS_SELECTOR, "a.cke_button__source"),
+    "editor_textarea": (By.XPATH, "//textarea[contains(@class, 'cke_source')]"),
+    "popup_name_field": (By.ID, "id_name"),
+    "popup_save_button": (By.XPATH, "//input[@value='Save']"),
+    # Primary save button (Save and add another)
+    "primary_save_button": [
+        (By.XPATH, "//input[@value='Save and add another']"),
+        (By.XPATH, "//input[@name='_addanother']"),
+        (By.CSS_SELECTOR, ".submit-row input[value='Save and add another']")
+    ],
+    # Fallback save button (only used if primary fails)
+    "fallback_save_button": [
+        (By.XPATH, "//input[@value='Save']"),
+        (By.CSS_SELECTOR, ".submit-row input[value='Save']"),
+        (By.XPATH, "//input[@value='SAVE']")
+    ]
+}
+
 class ContentPublisher:
-    def __init__(self, username, password, target_device):
+    """
+    A tool for publishing content to a Django admin site with Select2 dropdown support.
+    """
+    
+    def __init__(self, username, password):
+        """Set up the publisher with login credentials."""
+        self.telegram_bot = TelegramInteraction
         self.username = username
         self.password = password
-        self.target_device = target_device
+        self.urls = URLS
+        self.elements = ELEMENTS
         self.driver = None
         
-        # URLs and element locators
-        self.urls = {
-            "auth": "https://www.hardreset.info/admin/",
-            "add_description": "https://www.hardreset.info/admin/reset/otherdescription/add/"
-        }
-        
-        self.locators = {
-            # Login page
-            "username_field": (By.ID, "id_username"),
-            "password_field": (By.ID, "id_password"),
-            "login_button": (By.XPATH, "//input[@value='Log in']"),
-            
-            # Add description page
-            "other_name_field": (By.ID, "id_other_name"),
-            "other_name_textarea": (By.XPATH, "/html/body/div[1]/div[3]/div/form/div/fieldset/div[1]/div/div/span/span[1]/span"),
-            "other_name_options": (By.XPATH, "/html/body/div[1]/div[3]/div/form/div/fieldset/div[2]/div/div/span/span[1]/span"),
-            "reset_info_field": (By.ID, "id_reset_info"),
-            "reset_info_textarea": (By.XPATH, "//span[@aria-labelledby='select2-id_reset_info-container']"),
-            "reset_info_search": (By.XPATH, "//input[@class='select2-search__field']"),
-            "reset_info_options": (By.XPATH, "//ul[@id='select2-id_reset_info-results']/li"),
-            "source_button": (By.CSS_SELECTOR, "a.cke_button__source"),
-            "editor_textarea": (By.XPATH, "//textarea[contains(@class, 'cke_source')]"),
-            "save_button": (By.XPATH, "//input[@value='Save and add another']")
-        }
+        # Target device will be obtained from TelegramInteraction when needed
+        self.target_device = None
     
-    def setup_driver(self):
-        """Initialize and configure Chrome WebDriver"""
+    def start_browser(self):
+        """Start the Chrome browser."""
         options = Options()
         options.add_argument("--start-maximized")
-        # Uncomment for headless mode if needed
-        # options.add_argument("--headless")
-        
         self.driver = webdriver.Chrome(options=options)
-        logger.info("WebDriver initialized")
+        logger.info("Browser started")
+        return True
     
     def wait_for_element(self, locator, timeout=10):
-        """Wait for an element to be present and return it"""
+        """Wait for an element to appear and return it."""
         try:
             element = WebDriverWait(self.driver, timeout).until(
                 EC.presence_of_element_located(locator)
@@ -72,486 +87,497 @@ class ContentPublisher:
             logger.error(f"Element not found: {locator}")
             return None
     
-    def wait_for_clickable(self, locator, timeout=10):
-        """Wait for an element to be clickable and return it"""
+    def login(self):
+        """Log in to the admin site."""
         try:
-            element = WebDriverWait(self.driver, timeout).until(
-                EC.element_to_be_clickable(locator)
-            )
-            return element
-        except TimeoutException:
-            logger.error(f"Element not clickable: {locator}")
-            return None
-    
-    def fill_text_field(self, locator, text=None, clear_first=True):
-        """Fill a text field with the provided text"""
-        element = self.wait_for_element(locator)
-        if element and element.tag_name in ["input", "textarea"]:
-            if clear_first:
-                element.clear()
-            if text:
-                element.send_keys(text)
-            return True
-        else:
-            logger.error(f"Cannot fill text field: {locator}")
-            return False
-    
-    def click_element(self, locator):
-        """Click on an element"""
-        element = self.wait_for_clickable(locator)
-        if element:
-            element.click()
-            return True
-        return False
-    
-    def capture_screenshot(self, name="screenshot"):
-        """Capture a screenshot for debugging purposes"""
-        try:
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            filename = f"{name}_{timestamp}.png"
-            self.driver.save_screenshot(filename)
-            logger.info(f"Screenshot saved as {filename}")
-            return filename
-        except Exception as e:
-            logger.error(f"Failed to capture screenshot: {e}")
-            return None
-    
-    def wait_for_data_extraction(self, data_source, timeout=600, check_interval=10):
-        """Wait until data extraction is finished"""
-        logger.info("Waiting for data extraction to complete...")
-        start_time = time.time()
-        
-        while time.time() - start_time < timeout:
-            if hasattr(data_source, 'target_descriptions') and data_source.target_descriptions:
-                logger.info(f"Data extraction completed with {len(data_source.target_descriptions)} descriptions")
-                return True
+            logger.info("Logging in...")
+            self.driver.get(self.urls["login"])
             
-            logger.info("Data not ready yet, waiting...")
-            time.sleep(check_interval)
-        
-        logger.error(f"Timeout waiting for data extraction after {timeout} seconds")
-        return False
-    
-    def authenticate(self):
-        """Log in to the admin panel"""
-        try:
-            logger.info("Authenticating...")
-            self.driver.get(self.urls["auth"])
+            # Fill in username and password
+            username_field = self.wait_for_element(self.elements["username_field"])
+            password_field = self.wait_for_element(self.elements["password_field"])
+            login_button = self.wait_for_element(self.elements["login_button"])
             
-            self.fill_text_field(self.locators["username_field"], self.username)
-            self.fill_text_field(self.locators["password_field"], self.password)
-            self.click_element(self.locators["login_button"])
+            if not (username_field and password_field and login_button):
+                logger.error("Login form elements not found")
+                return False
             
-            # Check if authentication was successful
+            username_field.clear()
+            username_field.send_keys(self.username)
+            
+            password_field.clear()
+            password_field.send_keys(self.password)
+            
+            login_button.click()
+            time.sleep(2)  # Wait for login to complete
+            
+            # Check if login was successful
             if "site administration" in self.driver.title.lower():
-                logger.info("Authentication successful")
+                logger.info("Login successful")
                 return True
             else:
-                logger.error("Authentication failed")
+                logger.error("Login failed")
                 return False
+                
         except Exception as e:
-            logger.error(f"Authentication error: {e}")
+            logger.error(f"Error during login: {e}")
             return False
     
-    def click_source_button(self):
-        """Click the Source button in CKEditor toolbar"""
+    def switch_to_popup(self):
+        """Switch to a popup window."""
+        main_window = self.driver.current_window_handle
+        for handle in self.driver.window_handles:
+            if handle != main_window:
+                self.driver.switch_to.window(handle)
+                logger.info("Switched to popup window")
+                return True
+        
+        logger.error("No popup window found")
+        return False
+    
+    def switch_to_main_window(self):
+        """Close popup and switch back to main window."""
+        if len(self.driver.window_handles) > 1:
+            self.driver.close()  # Close the popup
+        
+        # Switch to the main window
+        self.driver.switch_to.window(self.driver.window_handles[0])
+        logger.info("Switched back to main window")
+        return True
+    
+    def create_dropdown_option(self, button_locator, name_value):
+        """Create a new option in a dropdown using the + button."""
         try:
-            logger.info("Attempting to click the Source button in CKEditor")
+            logger.info(f"Creating new dropdown option: {name_value}")
             
-            # Try multiple selector strategies for better reliability
-            selectors = [
-                "a.cke_button__source",                
-                ".cke_button__source",
-                "#cke_1_toolbox .cke_button__source"
-            ]
+            # Click the + button
+            add_button = self.wait_for_element(button_locator)
+            if not add_button:
+                logger.error("Add button not found")
+                return False
             
-            for selector in selectors:
+            add_button.click()
+            time.sleep(2)  # Wait for popup
+            
+            # Switch to popup window
+            if not self.switch_to_popup():
+                return False
+            
+            # Fill the name field
+            name_field = self.wait_for_element(self.elements["popup_name_field"])
+            if not name_field:
+                logger.error("Name field not found in popup")
+                self.switch_to_main_window()
+                return False
+            
+            name_field.clear()
+            name_field.send_keys(name_value)
+            
+            # Click Save
+            save_button = self.wait_for_element(self.elements["popup_save_button"])
+            if not save_button:
+                logger.error("Save button not found in popup")
+                self.switch_to_main_window()
+                return False
+            
+            save_button.click()
+            time.sleep(2)  # Wait for save to complete
+            
+            # Switch back to main window
+            self.switch_to_main_window()
+            logger.info(f"Created new option: {name_value}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error creating dropdown option: {e}")
+            # Make sure we're back on the main window
+            try:
+                self.switch_to_main_window()
+            except:
+                pass
+            return False
+    
+    def select_select2_option(self, select_id, option_text):
+        """
+        Select an option from a Select2 dropdown ensuring exact text match.
+        This will only select an option that exactly matches the provided text.
+        """
+        try:
+            logger.info(f"Selecting '{option_text}' from Select2 dropdown: {select_id}")
+            
+            # Take a screenshot before attempting to select
+            #self.driver.save_screenshot(f"before_select_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            
+            # First check if the dropdown is a Select2 dropdown
+            try:
+                select2_container = self.driver.find_element(By.CSS_SELECTOR, f".select2-selection[aria-labelledby='select2-{select_id}-container']")
+                
+                # Click to open the dropdown
+                select2_container.click()
+                time.sleep(1)  # Wait for dropdown to open
+                
+                # Look for search field
                 try:
-                    # Try to find the element with a short timeout
-                    source_button = WebDriverWait(self.driver, 2).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    search_box = self.driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
+                    search_box.clear()
+                    search_box.send_keys(option_text)
+                    time.sleep(1)  # Wait for search results
+                    logger.info(f"Searching for '{option_text}' in Select2 dropdown")
+                except:
+                    logger.info("No search box found in Select2 dropdown")
+                
+                # Take a screenshot of the open dropdown
+                #self.driver.save_screenshot(f"dropdown_open_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
+                
+                # Find exact match option using XPath
+                xpath = f"//li[contains(@class, 'select2-results__option') and text()='{option_text}']"
+                try:
+                    option = WebDriverWait(self.driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, xpath))
                     )
                     
-                    if source_button:
-                        # Try a normal click first
-                        source_button.click()
-                        logger.info(f"Successfully clicked Source button using selector: {selector}")
-                        time.sleep(0.5)  # Brief pause to let the editor switch modes
-                        return True
-                except Exception:
-                    continue  # Try next selector
+                    # Click the option
+                    option.click()
+                    logger.info(f"Selected exact match '{option_text}' from Select2 dropdown")
+                    time.sleep(1)  # Wait for selection to apply
+                    return True
+                    
+                except TimeoutException:
+                    logger.error(f"No exact match for '{option_text}' found in Select2 dropdown")
+                    
+                    # Close the dropdown by clicking elsewhere
+                    try:
+                        self.driver.find_element(By.TAG_NAME, "body").click()
+                    except:
+                        pass
+                    
+                    return False
             
-            # If regular clicks failed, try JavaScript click as fallback
-            logger.info("Regular click methods failed, trying JavaScript click")
-            script = "document.querySelector('a.cke_button__source').click();"
-            self.driver.execute_script(script)
-            logger.info("Clicked Source button via JavaScript")
-            time.sleep(0.5)
+            except NoSuchElementException:
+                # Not a Select2 dropdown, try standard dropdown
+                logger.info(f"{select_id} is not a Select2 dropdown, trying standard dropdown")
+                return self.select_standard_dropdown(select_id, option_text)
+                
+        except Exception as e:
+            logger.error(f"Error selecting from Select2 dropdown: {e}")
+            
+            # Take a screenshot of the error state
+            #self.driver.save_screenshot(f"select2_error_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            
+            # Close the dropdown if it's open
+            try:
+                self.driver.find_element(By.TAG_NAME, "body").click()
+            except:
+                pass
+                
+            return False
+    
+    def select_standard_dropdown(self, select_id, option_text):
+        """Select an option from a standard HTML select dropdown."""
+        try:
+            logger.info(f"Selecting '{option_text}' from standard dropdown: {select_id}")
+            
+            # Find the dropdown
+            dropdown = self.driver.find_element(By.ID, select_id)
+            select = Select(dropdown)
+            
+            # Try to select by exact text
+            try:
+                select.select_by_visible_text(option_text)
+                logger.info(f"Selected exact match '{option_text}' from standard dropdown")
+                return True
+            except:
+                logger.error(f"No exact match for '{option_text}' in standard dropdown")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error selecting from standard dropdown: {e}")
+            return False
+    
+    def enter_editor_content(self, content):
+        """Enter content into the CKEditor."""
+        try:
+            logger.info("Entering content into editor")
+            
+            # Click source button to access HTML mode
+            source_button = self.wait_for_element(self.elements["source_button"])
+            if not source_button:
+                logger.error("Source button not found")
+                return False
+            
+            source_button.click()
+            time.sleep(1)  # Wait for editor mode to change
+            
+            # Find and fill the textarea
+            textarea = self.wait_for_element(self.elements["editor_textarea"])
+            if not textarea:
+                logger.error("Editor textarea not found")
+                return False
+            
+            textarea.clear()
+            time.sleep(1)  # Wait after clearing
+            textarea.send_keys(content)
+            logger.info("Content entered successfully")
             return True
-                
+            
         except Exception as e:
-            logger.error(f"Error clicking Source button after all attempts: {e}")
+            logger.error(f"Error entering editor content: {e}")
             return False
     
-    def select_other_name(self, other_name):
-        """Select the 'Other name' option using autocomplete"""
+    def save_form(self):
+        """
+        Save the form prioritizing 'Save and add another' button.
+        Only fall back to regular 'Save' button if primary button fails.
+        """
         try:
-            logger.info(f"Attempting to select Other name: '{other_name}'")
+            logger.info("Trying to save form")
             
-            # Capture initial state
-            self.capture_screenshot("before_other_name_selection")
+            # Take screenshot before saving
+            self.driver.save_screenshot(f"before_save_{time.strftime('%Y%m%d-%H%M%S')}.png")
             
-            # First try to find the select element itself
-            select_element = self.wait_for_element((By.ID, "id_other_name"))
-            if not select_element:
-                self.capture_screenshot("other_name_element_not_found")
-                logger.error("Could not find the id_other_name element")
-                return False
-                
-            # Wait a moment for the page to stabilize
-            time.sleep(2)
+            # First try PRIMARY save button (Save and add another)
+            primary_success = self._try_save_with_button_list(self.elements["primary_save_button"])
             
-            # Try different approaches to interact with the dropdown
-            
-            # Approach 1: Try using Select class if it's a regular dropdown
-            try:
-                from selenium.webdriver.support.ui import Select
-                dropdown = Select(select_element)
-                dropdown.select_by_visible_text(other_name)
-                logger.info(f"Selected Other name '{other_name}' using Select class")
+            # If primary method succeeded, return True
+            if primary_success:
                 return True
-            except Exception as e:
-                logger.info(f"Select class approach failed: {e}")
-                self.   ("select_class_failed")
+                
+            # If primary method failed, try fallback (regular Save button)
+            logger.info("Primary save button failed, trying fallback Save button")
+            fallback_success = self._try_save_with_button_list(self.elements["fallback_save_button"])
             
-            # Approach 2: Try clicking the dropdown using JavaScript
-            try:
-                logger.info("Trying JavaScript click on the dropdown")
-                self.driver.execute_script("document.getElementById('id_other_name').click();")
-                time.sleep(1)
-                self.capture_screenshot("after_js_click")
-                
-                # Now try to find the search field
-                search_field = self.driver.find_element(By.XPATH, "//input[contains(@class, 'select2-search__field')]")
-                search_field.send_keys(other_name)
-                time.sleep(1)
-                self.capture_screenshot("after_search_text")
-                
-                # Try to find and click an option containing our text
-                option = self.driver.find_element(By.XPATH, f"//li[contains(text(), '{other_name}')]")
-                option.click()
-                logger.info(f"Selected Other name '{other_name}' using JavaScript and XPath")
+            # If fallback succeeded, return True
+            if fallback_success:
                 return True
-            except Exception as e:
-                logger.info(f"JavaScript approach failed: {e}")
-                self.capture_screenshot("js_approach_failed")
             
-            # Approach 3: Direct option selection by JavaScript
+            # Last resort: Try tab navigation and Enter key
+            logger.info("Trying keyboard navigation as last resort")
             try:
-                logger.info("Trying direct option selection by JavaScript")
-                script = f"""
-                var select = document.getElementById('id_other_name');
-                for (var i = 0; i < select.options.length; i++) {{
-                    if (select.options[i].text.includes('{other_name}')) {{
-                        select.selectedIndex = i;
-                        var event = new Event('change');
-                        select.dispatchEvent(event);
-                        return true;
-                    }}
-                }}
-                return false;
-                """
-                result = self.driver.execute_script(script)
-                if result:
-                    logger.info(f"Selected Other name '{other_name}' using direct JavaScript option selection")
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.TAB * 10)  # Try to tab to the save button
+                body.send_keys(Keys.ENTER)
+                time.sleep(3)
+                if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                    logger.info("Form saved successfully with keyboard navigation")
                     return True
-                else:
-                    logger.warning(f"No option found for '{other_name}' using JavaScript")
-                    self.capture_screenshot("no_option_found")
-            except Exception as e:
-                logger.info(f"Direct JavaScript selection failed: {e}")
-                self.capture_screenshot("direct_js_failed")
+            except:
+                logger.info("Keyboard navigation failed")
             
-            # Approach 4: Try finding the element by alternative means
+            # If we're still here, try all submit buttons as last resort
             try:
-                logger.info("Trying alternative element finding approach")
+                all_buttons = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
+                logger.info(f"Found {len(all_buttons)} submit buttons on page")
                 
-                # Try direct XPath to the Select2 container
-                dropdown_container = self.driver.find_element(By.CSS_SELECTOR, ".select2-container")
-                dropdown_container.click()
-                time.sleep(1)
-                self.capture_screenshot("after_container_click")
-                
-                # Try to find search input
-                search_input = self.driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
-                search_input.send_keys(other_name)
-                time.sleep(1)
-                
-                # Try to select first option
-                first_option = self.driver.find_element(By.CSS_SELECTOR, ".select2-results__option")
-                first_option.click()
-                logger.info("Selected option using alternative approach")
-                return True
+                for i, btn in enumerate(all_buttons):
+                    value = btn.get_attribute('value')
+                    # Skip buttons we've already tried
+                    if value in ["Save and add another", "Save"]:
+                        continue
+                        
+                    logger.info(f"Trying button {i+1}: value='{value}'")
+                    try:
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                        time.sleep(1)
+                        self.driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(3)
+                        if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                            logger.info(f"Form saved successfully with button {i+1}")
+                            return True
+                    except:
+                        continue
             except Exception as e:
-                logger.info(f"Alternative approach failed: {e}")
-                self.capture_screenshot("alternative_approach_failed")
-            
-            # Final fallback: Print the page source for debugging
-            try:
-                with open("page_source.html", "w", encoding="utf-8") as f:
-                    f.write(self.driver.page_source)
-                logger.info("Saved page source to page_source.html")
-            except Exception as e:
-                logger.error(f"Failed to save page source: {e}")
-            
-            logger.error(f"All approaches failed to select Other name: '{other_name}'")
+                logger.info(f"Error trying all buttons: {e}")
+                
+            # If we get here, all approaches failed
+            logger.error("All save approaches failed")
+            self.driver.save_screenshot(f"save_failed_{time.strftime('%Y%m%d-%H%M%S')}.png")
             return False
-            
+                
         except Exception as e:
-            self.capture_screenshot("error_in_select_other_name")
-            logger.error(f"Error in select_other_name: {e}")
-            return False
-    
-    def select_reset_info(self, device_name):
-        """Select the 'Reset info' option using autocomplete"""
-        try:
-            logger.info(f"Attempting to select Reset info: '{device_name}'")
-            
-            # Capture initial state
-            self.capture_screenshot("before_reset_info_selection")
-            
-            # First try to find the select element itself
-            select_element = self.wait_for_element((By.ID, "id_reset_info"))
-            if not select_element:
-                self.capture_screenshot("reset_info_element_not_found")
-                logger.error("Could not find the id_reset_info element")
-                return False
-                
-            # Wait a moment for the page to stabilize
-            time.sleep(2)
-            
-            # Try different approaches to interact with the dropdown
-            
-            # Approach 1: Try using Select class if it's a regular dropdown
-            try:
-                from selenium.webdriver.support.ui import Select
-                dropdown = Select(select_element)
-                dropdown.select_by_visible_text(device_name)
-                logger.info(f"Selected Reset info '{device_name}' using Select class")
-                return True
-            except Exception as e:
-                logger.info(f"Select class approach failed: {e}")
-                self.capture_screenshot("select_class_failed_reset_info")
-            
-            # Approach 2: Try clicking the dropdown using JavaScript
-            try:
-                logger.info("Trying JavaScript click on the dropdown")
-                self.driver.execute_script("document.getElementById('id_reset_info').click();")
-                time.sleep(1)
-                self.capture_screenshot("after_js_click_reset_info")
-                
-                # Now try to find the search field
-                search_field = self.driver.find_element(By.XPATH, "//input[contains(@class, 'select2-search__field')]")
-                search_field.send_keys(device_name)
-                time.sleep(1)
-                self.capture_screenshot("after_search_text_reset_info")
-                
-                # Try to find and click an option containing our text
-                option = self.driver.find_element(By.XPATH, f"//li[contains(text(), '{device_name}')]")
-                option.click()
-                logger.info(f"Selected Reset info '{device_name}' using JavaScript and XPath")
-                return True
-            except Exception as e:
-                logger.info(f"JavaScript approach failed: {e}")
-                self.capture_screenshot("js_approach_failed_reset_info")
-            
-            # Approach 3: Direct option selection by JavaScript
-            try:
-                logger.info("Trying direct option selection by JavaScript")
-                script = f"""
-                var select = document.getElementById('id_reset_info');
-                for (var i = 0; i < select.options.length; i++) {{
-                    if (select.options[i].text.includes('{device_name}')) {{
-                        select.selectedIndex = i;
-                        var event = new Event('change');
-                        select.dispatchEvent(event);
-                        return true;
-                    }}
-                }}
-                return false;
-                """
-                result = self.driver.execute_script(script)
-                if result:
-                    logger.info(f"Selected Reset info '{device_name}' using direct JavaScript option selection")
-                    return True
-                else:
-                    logger.warning(f"No option found for '{device_name}' using JavaScript")
-                    self.capture_screenshot("no_option_found_reset_info")
-            except Exception as e:
-                logger.info(f"Direct JavaScript selection failed: {e}")
-                self.capture_screenshot("direct_js_failed_reset_info")
-            
-            # Approach 4: Try finding the element by alternative means
-            try:
-                logger.info("Trying alternative element finding approach")
-                
-                # Try direct XPath to the Select2 container
-                dropdown_containers = self.driver.find_elements(By.CSS_SELECTOR, ".select2-container")
-                if len(dropdown_containers) > 1:
-                    dropdown_containers[1].click()  # Second container should be the reset_info dropdown
-                time.sleep(1)
-                self.capture_screenshot("after_container_click_reset_info")
-                
-                # Try to find search input
-                search_input = self.driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
-                search_input.send_keys(device_name)
-                time.sleep(1)
-                
-                # Try to select first option
-                first_option = self.driver.find_element(By.CSS_SELECTOR, ".select2-results__option")
-                first_option.click()
-                logger.info("Selected option using alternative approach")
-                return True
-            except Exception as e:
-                logger.info(f"Alternative approach failed: {e}")
-                self.capture_screenshot("alternative_approach_failed_reset_info")
-            
-            logger.error(f"All approaches failed to select Reset info: '{device_name}'")
+            logger.error(f"Error in save_form method: {e}")
+            self.driver.save_screenshot(f"save_error_{time.strftime('%Y%m%d-%H%M%S')}.png")
             return False
             
-        except Exception as e:
-            self.capture_screenshot("error_in_select_reset_info")
-            logger.error(f"Error in select_reset_info: {e}")
-            return False
+    def _try_save_with_button_list(self, button_locators):
+        """Helper method to try multiple approaches with a list of button locators."""
+        for button_locator in button_locators:
+            try:
+                logger.info(f"Trying save button: {button_locator}")
+                save_button = self.wait_for_element(button_locator)
+                
+                if not save_button:
+                    logger.info(f"Button not found: {button_locator}")
+                    continue
+                
+                # Take screenshot of the found button
+                self.driver.save_screenshot(f"button_found_{time.strftime('%Y%m%d-%H%M%S')}.png")
+                
+                # Approach 1: Direct click
+                try:
+                    logger.info("Trying direct click")
+                    save_button.click()
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with direct click")
+                        return True
+                except ElementClickInterceptedException:
+                    logger.info("Direct click intercepted, trying alternatives")
+                except Exception as e:
+                    logger.info(f"Direct click failed: {e}")
+                
+                # Approach 2: JavaScript click
+                try:
+                    logger.info("Trying JavaScript click")
+                    self.driver.execute_script("arguments[0].click();", save_button)
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with JavaScript click")
+                        return True
+                except Exception as e:
+                    logger.info(f"JavaScript click failed: {e}")
+                
+                # Approach 3: Scroll into view first, then JS click
+                try:
+                    logger.info("Trying scroll then JavaScript click")
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", save_button)
+                    time.sleep(1)
+                    self.driver.execute_script("arguments[0].click();", save_button)
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with scroll+JS click")
+                        return True
+                except Exception as e:
+                    logger.info(f"Scroll+JS click failed: {e}")
+                    
+            except Exception as e:
+                logger.info(f"Error with button {button_locator}: {e}")
+                continue
+                
+        # If we reach here, all approaches with this list of buttons failed
+        return False
     
     def publish_description(self, description_name, content):
-        """Publish a single description"""
+        """Publish a single description."""
         try:
             logger.info(f"Publishing description: '{description_name}'")
             
+            # Get the target device from TelegramInteraction if not already set
+            if not self.target_device and hasattr(self.telegram_bot, 'target_model'):
+                self.target_device = self.telegram_bot.target_model
+                logger.info(f"Using target device: {self.target_device}")
+            
+            if not self.target_device:
+                logger.error("No target device available. Ensure target_model is set in TelegramInteraction.")
+                return False
+            
             # Navigate to add description page
             self.driver.get(self.urls["add_description"])
+            time.sleep(3)  # Wait for page load
             
-            # 1. Select description type using autocomplete
-            if not self.select_other_name(description_name):
-                logger.error(f"Failed to select Other name: '{description_name}'")
+            # Take screenshot of initial page
+            #self.driver.save_screenshot(f"page_load_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            
+            # Select the description name from dropdown
+            if not self.select_select2_option("id_other_name", description_name):
+                logger.error(f"Failed to select '{description_name}' from dropdown")
                 return False
             
-            # 2. Select target device using autocomplete
-            if not self.select_reset_info(self.target_device):
-                logger.error(f"Failed to select Reset info: '{self.target_device}'")
+            # Select the device from dropdown
+            if not self.select_select2_option("id_reset_info", self.target_device):
+                logger.error(f"Failed to select '{self.target_device}' from dropdown")
                 return False
             
-            # 3. Click source button
-            if not self.click_source_button():
-                logger.error(f"Failed to click source button for '{description_name}'")
+            # Enter content
+            if not self.enter_editor_content(content):
                 return False
             
-            # 4. Paste the content
-            # Wait for textarea to appear after switching to source mode
-            textarea = self.wait_for_element((By.XPATH, "//textarea[contains(@class, 'cke_source')]"))
-            if textarea:
-                textarea.clear()
-                textarea.send_keys(content)
-                logger.info(f"Content pasted for '{description_name}'")
-            else:
-                logger.error(f"Textarea not found for '{description_name}'")
+            # Save the form using our enhanced save method
+            if not self.save_form():
                 return False
             
-            # 5. Click Save and add another
-            save_button = self.wait_for_clickable((By.XPATH, "//input[@value='Save and add another']"))
-            if save_button:
-                save_button.click()
-                logger.info(f"Saved description: '{description_name}'")
-                
-                # Wait for the page to reload
-                time.sleep(2)
-                return True
-            else:
-                logger.error(f"Save button not found for '{description_name}'")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error publishing description '{description_name}': {e}")
-            return False
-    
-    def publish_all_descriptions(self, descriptions_dict):
-        """Publish all descriptions in the dictionary"""
-        logger.info(f"Publishing {len(descriptions_dict)} descriptions")
-        success_count = 0
-        
-        try:
-            for description_name, message in descriptions_dict.items():
-                # Extract content from message object (adjust based on your actual structure)
-                if hasattr(message, 'content'):
-                    content = message.content[0].text
-                else:
-                    # If message is already a string
-                    content = message
-                
-                success = self.publish_description(description_name, content)
-                if success:
-                    success_count += 1
-            
-            logger.info(f"Published {success_count} of {len(descriptions_dict)} descriptions")
-            return success_count
-        except Exception as e:
-            logger.error(f"Error in publish_all_descriptions: {e}")
-            return success_count
-    
-    def run(self, data_source):
-        """Main execution method"""
-        try:
-            logger.info("Starting content publisher")
-            self.setup_driver()
-            
-            # 1. Wait for data extraction to complete
-            if not self.wait_for_data_extraction(data_source):
-                logger.error("Data extraction did not complete in time")
-                return False
-            
-            # 2. Authenticate
-            if not self.authenticate():
-                logger.error("Authentication failed")
-                return False
-            
-            # 3-8. Publish all descriptions
-            publish_count = self.publish_all_descriptions(data_source.target_descriptions)
-            
-            logger.info(f"Content publishing completed. Published {publish_count} descriptions")
+            logger.info(f"Successfully published '{description_name}'")
             return True
             
         except Exception as e:
-            logger.error(f"Error during execution: {e}")
+            logger.error(f"Error publishing description: {e}")
+            self.driver.save_screenshot(f"error_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            return False
+    
+    def run(self):
+        """
+        Run the complete publishing process using data from TelegramInteraction.
+        """
+        try:
+            logger.info("Starting content publisher")
+            
+            # Check if we have the necessary data in TelegramInteraction
+            if not hasattr(self.telegram_bot, 'target_model') or not self.telegram_bot.target_model:
+                logger.error("No target_model found in TelegramInteraction")
+                return False
+                
+            if not hasattr(self.telegram_bot, 'target_descriptions') or not self.telegram_bot.target_descriptions:
+                logger.error("No target_descriptions found in TelegramInteraction")
+                return False
+            
+            # Store target device for use in publishing
+            self.target_device = self.telegram_bot.target_model
+            descriptions = self.telegram_bot.target_descriptions
+            
+            logger.info(f"Running with target device: {self.target_device}")
+            logger.info(f"Found {len(descriptions)} descriptions to publish")
+            
+            # Start browser
+            if not self.start_browser():
+                return False
+            
+            # Login
+            if not self.login():
+                return False
+            
+            # Publish all descriptions
+            success_count = 0
+            for name, content in descriptions.items():
+                if self.publish_description(name, content):
+                    success_count += 1
+            
+            logger.info(f"Content publishing completed. Published {success_count} of {len(descriptions)} descriptions")
+            
+            # Clear data from TelegramInteraction when done
+            self.telegram_bot.target_descriptions = {}
+            self.telegram_bot.target_model = None
+            logger.info("Cleared data from TelegramInteraction")
+            
+            return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"Error running publisher: {e}")
             return False
         finally:
-            # Ensure driver is quit properly
+            # Always close the browser
             if self.driver:
-                logger.info("Closing WebDriver")
+                logger.info("Closing browser")
                 self.driver.quit()
 
 
-# Add this part to test the script when run directly
+# For standalone testing
 if __name__ == "__main__":
-    print("Starting ContentPublisher test")
+    # Set up test data if running independently
+    if not hasattr(TelegramInteraction, 'target_model') or not TelegramInteraction.target_model:
+        TelegramInteraction.target_model = "AGM G2 Pro"
+        print(f"Set default target_model for testing: {TelegramInteraction.target_model}")
+        
+    if not hasattr(TelegramInteraction, 'target_descriptions') or not TelegramInteraction.target_descriptions:
+        TelegramInteraction.target_descriptions = {
+            "Hard Reset": "This is a sample reset description for testing.",
+            "Developer Options": "This is how to enable developer options."
+        }
+        print(f"Set default target_descriptions for testing with {len(TelegramInteraction.target_descriptions)} items")
     
-    # Create a test instance with your credentials
-    publisher = ContentPublisher(
-        username="Istomin", 
-        password="VnXJ7i47n4tjWj&g",
-        target_device="HUAWEI Mate 70 Pro Premium"
-    )
+    # Create and run the publisher
+    publisher = ContentPublisher(username="Istomin", password="VnXJ7i47n4tjWj&g")
+    success = publisher.run()
     
-    # Create test data
-    class MockDataSource:
-        def __init__(self):
-            self.target_descriptions = {
-                "Hard Reset": "This is a sample reset description for testing.",
-                "Developer Options": "This is how to enable developer options."
-            }
-    
-    # Run with the test data
-    test_data = MockDataSource()
-    print("Running publisher with test data...")
-    publisher.run(test_data)
-    print("Publisher test complete")
+    if success:
+        print("Publishing completed successfully")
+    else:
+        print("Publishing failed")
