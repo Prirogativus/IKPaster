@@ -7,6 +7,7 @@ import TelegramInteraction
 import DataExtractor
 import AnthropicAPI
 import ContentPublisher
+from DataManager import data_manager
 
 # Setup logging
 logging.basicConfig(
@@ -21,12 +22,12 @@ logger = logging.getLogger(__name__)
 
 # File paths for communication between processes
 MODEL_DATA_FILE = "telegram_model_data.json"
-DESCRIPTIONS_FILE = "extracted_descriptions.json"
+DESCRIPTIONS_FILE = "descriptions_data.json"
 
 class AutomationOrchestrator:
     """
     Orchestrates the workflow between Telegram bot, DataExtractor, AnthropicAPI, and ContentPublisher.
-    Uses file-based communication to share data between processes.
+    Uses DataManager for inter-module communication.
     """
     
     def __init__(self):
@@ -46,13 +47,12 @@ class AutomationOrchestrator:
         
         logger.info("AutomationOrchestrator initialized")
     
-    def save_models_to_telegram_interaction(self):
+    def save_models_to_data_manager(self):
         """
-        Save the model data to TelegramInteraction module for use by other components.
+        Save the model data to DataManager for use by other components.
         """
-        self.telegram_bot.example_model = self.example_model
-        self.telegram_bot.target_model = self.target_model
-        logger.info(f"Saved models to TelegramInteraction: Example={self.example_model}, Target={self.target_model}")
+        data_manager.set_models(self.example_model, self.target_model)
+        logger.info(f"Saved models to DataManager: Example={self.example_model}, Target={self.target_model}")
     
     def check_model_file(self):
         """
@@ -89,8 +89,8 @@ class AutomationOrchestrator:
                 self.example_model = example_model
                 self.target_model = target_model
                 
-                # Save to TelegramInteraction module for other components
-                self.save_models_to_telegram_interaction()
+                # Save to DataManager for other components
+                self.save_models_to_data_manager()
                 
                 logger.info(f"Received inputs from file - Example: {example_model}, Target: {target_model}")
                 return True
@@ -149,12 +149,13 @@ class AutomationOrchestrator:
             # Run the extractor
             data_extractor.run()
             
-            # Save the extracted descriptions to a file
+            # Save the extracted descriptions to file and DataManager
             if hasattr(data_extractor, 'example_descriptions') and data_extractor.example_descriptions:
+                # Save to file for backup
                 self.save_descriptions_to_file(data_extractor.example_descriptions)
                 
-                # Also save to TelegramInteraction for other components
-                self.telegram_bot.target_descriptions = data_extractor.example_descriptions
+                # Save to DataManager
+                data_manager.set_target_descriptions(data_extractor.example_descriptions)
             
             # Set flag to indicate completion
             self.extraction_complete = True
@@ -178,23 +179,32 @@ class AutomationOrchestrator:
             time.sleep(5)
         
         try:
-            # Load descriptions from file if not available in TelegramInteraction
-            if not hasattr(self.telegram_bot, 'target_descriptions') or not self.telegram_bot.target_descriptions:
+            # Make sure data is available in DataManager
+            descriptions = data_manager.get_target_descriptions()
+            if not descriptions:
+                logger.info("No descriptions in DataManager, trying to load from file")
                 descriptions = self.load_descriptions_from_file()
                 if descriptions:
-                    self.telegram_bot.target_descriptions = descriptions
+                    data_manager.set_target_descriptions(descriptions)
+            
+            if not descriptions:
+                logger.error("No descriptions available for processing")
+                self.anthropic_complete = True
+                return
             
             logger.info("Starting AnthropicAPI processing...")
+            
             # Run the AnthropicAPI
             success = AnthropicAPI.get_target_text()
             
-            if success and hasattr(self.telegram_bot, 'target_descriptions'):
-                # Save the processed descriptions to file
-                self.save_descriptions_to_file(self.telegram_bot.target_descriptions)
+            if success:
+                # Save processed descriptions to file for backup
+                self.save_descriptions_to_file(data_manager.get_target_descriptions())
+                logger.info("Descriptions saved to file after processing")
             
             # Set flag to indicate completion
             self.anthropic_complete = True
-            logger.info("AnthropicAPI processing completed successfully")
+            logger.info("AnthropicAPI processing completed successfully" if success else "AnthropicAPI processing failed")
             
         except Exception as e:
             logger.error(f"Error in AnthropicAPI: {e}")
@@ -216,11 +226,21 @@ class AutomationOrchestrator:
         try:
             logger.info("Starting ContentPublisher...")
             
-            # Load descriptions from file if not available in TelegramInteraction
-            if not hasattr(self.telegram_bot, 'target_descriptions') or not self.telegram_bot.target_descriptions:
+            # Make sure data is available in DataManager
+            descriptions = data_manager.get_target_descriptions()
+            if not descriptions:
+                logger.info("No descriptions in DataManager, trying to load from file")
                 descriptions = self.load_descriptions_from_file()
                 if descriptions:
-                    self.telegram_bot.target_descriptions = descriptions
+                    data_manager.set_target_descriptions(descriptions)
+            
+            if not descriptions:
+                logger.error("No descriptions available for publishing")
+                return
+            
+            # Prepare the descriptions for publishing (clean up, validate, etc.)
+            logger.info("Preparing content for publishing...")
+            data_manager.prepare_descriptions_for_publishing()
             
             # Create ContentPublisher instance
             content_publisher = ContentPublisher.ContentPublisher(
@@ -229,9 +249,9 @@ class AutomationOrchestrator:
             )
             
             # Run the publisher
-            content_publisher.run()
+            success = content_publisher.run()
             
-            logger.info("ContentPublisher completed successfully")
+            logger.info("ContentPublisher completed successfully" if success else "ContentPublisher failed")
             
             # Clean up files
             self.cleanup_files()

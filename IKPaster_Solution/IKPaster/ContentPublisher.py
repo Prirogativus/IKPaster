@@ -8,6 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.common.keys import Keys
 import TelegramInteraction
+from DataManager import data_manager  # Import the data manager
 
 # Set up logging
 logging.basicConfig(
@@ -54,29 +55,42 @@ ELEMENTS = {
 class ContentPublisher:
     """
     A tool for publishing content to a Django admin site with Select2 dropdown support.
+    Uses DataManager for data exchange with other modules.
     """
     
     def __init__(self, username, password):
         """Set up the publisher with login credentials."""
-        self.telegram_bot = TelegramInteraction
         self.username = username
         self.password = password
         self.urls = URLS
         self.elements = ELEMENTS
         self.driver = None
         
-        # Target device will be obtained from TelegramInteraction when needed
+        # Target device will be obtained from DataManager
         self.target_device = None
+        
+        logger.info("ContentPublisher initialized")
     
     def start_browser(self):
         """Start the Chrome browser."""
         options = Options()
         options.add_argument("--start-maximized")
+        # Add these options for better stability
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        # Increase page load timeout for better stability
+        options.page_load_strategy = 'eager'
+        
         self.driver = webdriver.Chrome(options=options)
+        # Set longer timeouts for stability
+        self.driver.set_script_timeout(120)
+        self.driver.set_page_load_timeout(120)
         logger.info("Browser started")
         return True
     
-    def wait_for_element(self, locator, timeout=10):
+    def wait_for_element(self, locator, timeout=15):
         """Wait for an element to appear and return it."""
         try:
             element = WebDriverWait(self.driver, timeout).until(
@@ -205,9 +219,6 @@ class ContentPublisher:
         try:
             logger.info(f"Selecting '{option_text}' from Select2 dropdown: {select_id}")
             
-            # Take a screenshot before attempting to select
-            #self.driver.save_screenshot(f"before_select_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            
             # First check if the dropdown is a Select2 dropdown
             try:
                 select2_container = self.driver.find_element(By.CSS_SELECTOR, f".select2-selection[aria-labelledby='select2-{select_id}-container']")
@@ -225,9 +236,6 @@ class ContentPublisher:
                     logger.info(f"Searching for '{option_text}' in Select2 dropdown")
                 except:
                     logger.info("No search box found in Select2 dropdown")
-                
-                # Take a screenshot of the open dropdown
-                #self.driver.save_screenshot(f"dropdown_open_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
                 
                 # Find exact match option using XPath
                 xpath = f"//li[contains(@class, 'select2-results__option') and text()='{option_text}']"
@@ -261,9 +269,6 @@ class ContentPublisher:
         except Exception as e:
             logger.error(f"Error selecting from Select2 dropdown: {e}")
             
-            # Take a screenshot of the error state
-            #self.driver.save_screenshot(f"select2_error_{select_id}_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            
             # Close the dropdown if it's open
             try:
                 self.driver.find_element(By.TAG_NAME, "body").click()
@@ -294,8 +299,26 @@ class ContentPublisher:
             logger.error(f"Error selecting from standard dropdown: {e}")
             return False
     
+    def trim_content_if_needed(self, content, max_length=65000):
+        """Trim content if it exceeds maximum allowed length."""
+        if len(content) > max_length:
+            logger.warning(f"Content too large ({len(content)} chars), trimming to {max_length} chars")
+            # Find a good breaking point - end of a tag
+            breaking_point = content.rfind('</li>', 0, max_length)
+            if breaking_point == -1:
+                breaking_point = content.rfind('</p>', 0, max_length)
+            if breaking_point == -1:
+                breaking_point = content.rfind('.', 0, max_length)
+            if breaking_point == -1:
+                breaking_point = max_length
+            
+            # Add a note about truncation
+            trimmed = content[:breaking_point] + "\n<!-- Content was trimmed due to size limitations -->"
+            return trimmed
+        return content
+    
     def enter_editor_content(self, content):
-        """Enter content into the CKEditor."""
+        """Enter content into the CKEditor with chunking for large content."""
         try:
             logger.info("Entering content into editor")
             
@@ -308,15 +331,41 @@ class ContentPublisher:
             source_button.click()
             time.sleep(1)  # Wait for editor mode to change
             
-            # Find and fill the textarea
+            # Find the textarea
             textarea = self.wait_for_element(self.elements["editor_textarea"])
             if not textarea:
                 logger.error("Editor textarea not found")
                 return False
             
+            # Clear the textarea
             textarea.clear()
             time.sleep(1)  # Wait after clearing
-            textarea.send_keys(content)
+            
+            # For large text, we need to chunk it to avoid performance issues
+            # This is a common issue with Selenium and large text inputs
+            if len(content) > 5000:
+                logger.info(f"Content is large ({len(content)} chars), using chunking approach")
+                # Split the content into manageable chunks
+                chunk_size = 1000
+                chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+                
+                # Insert content chunk by chunk with small pauses
+                for i, chunk in enumerate(chunks):
+                    logger.info(f"Inserting chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+                    # Execute JavaScript to insert the chunk at the current position
+                    js_script = f"arguments[0].value += arguments[1];"
+                    self.driver.execute_script(js_script, textarea, chunk)
+                    time.sleep(0.5)  # Give browser time to process
+                    
+                    # Every few chunks, perform a refocus to ensure browser stability
+                    if (i+1) % 5 == 0:
+                        logger.info("Refocusing textarea")
+                        self.driver.execute_script("arguments[0].focus();", textarea)
+                        time.sleep(0.5)
+            else:
+                # For smaller content, use direct send_keys
+                textarea.send_keys(content)
+                
             logger.info("Content entered successfully")
             return True
             
@@ -457,25 +506,36 @@ class ContentPublisher:
         return False
     
     def publish_description(self, description_name, content):
-        """Publish a single description."""
+        """Publish a single description with content size management."""
         try:
             logger.info(f"Publishing description: '{description_name}'")
             
-            # Get the target device from TelegramInteraction if not already set
-            if not self.target_device and hasattr(self.telegram_bot, 'target_model'):
-                self.target_device = self.telegram_bot.target_model
-                logger.info(f"Using target device: {self.target_device}")
+            # Get the target device from DataManager if not already set
+            if not self.target_device:
+                self.target_device = data_manager.get_target_model()
+                logger.info(f"Using target device from DataManager: {self.target_device}")
             
             if not self.target_device:
-                logger.error("No target device available. Ensure target_model is set in TelegramInteraction.")
+                logger.error("No target device available. Ensure target_model is set in DataManager.")
                 return False
+            
+            # Trim content if needed to prevent browser performance issues
+            original_length = len(content)
+            content = self.trim_content_if_needed(content)
+            if len(content) < original_length:
+                logger.warning(f"Content for '{description_name}' was trimmed from {original_length} to {len(content)} chars")
+            
+            # Remove code block markers if present
+            if content.strip().startswith("```html"):
+                logger.info(f"Removing code block markers from '{description_name}'")
+                content = content.strip().replace("```html", "", 1)
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
             
             # Navigate to add description page
             self.driver.get(self.urls["add_description"])
             time.sleep(3)  # Wait for page load
-            
-            # Take screenshot of initial page
-            #self.driver.save_screenshot(f"page_load_{time.strftime('%Y%m%d-%H%M%S')}.png")
             
             # Select the description name from dropdown
             if not self.select_select2_option("id_other_name", description_name):
@@ -505,23 +565,24 @@ class ContentPublisher:
     
     def run(self):
         """
-        Run the complete publishing process using data from TelegramInteraction.
+        Run the complete publishing process using data from DataManager.
+        Includes retry mechanism and better error handling.
         """
         try:
             logger.info("Starting content publisher")
             
-            # Check if we have the necessary data in TelegramInteraction
-            if not hasattr(self.telegram_bot, 'target_model') or not self.telegram_bot.target_model:
-                logger.error("No target_model found in TelegramInteraction")
+            # Get data from DataManager
+            self.target_device = data_manager.get_target_model()
+            descriptions = data_manager.get_target_descriptions()
+            
+            # Check if we have the necessary data
+            if not self.target_device:
+                logger.error("No target_model found in DataManager")
                 return False
                 
-            if not hasattr(self.telegram_bot, 'target_descriptions') or not self.telegram_bot.target_descriptions:
-                logger.error("No target_descriptions found in TelegramInteraction")
+            if not descriptions:
+                logger.error("No target_descriptions found in DataManager")
                 return False
-            
-            # Store target device for use in publishing
-            self.target_device = self.telegram_bot.target_model
-            descriptions = self.telegram_bot.target_descriptions
             
             logger.info(f"Running with target device: {self.target_device}")
             logger.info(f"Found {len(descriptions)} descriptions to publish")
@@ -534,18 +595,51 @@ class ContentPublisher:
             if not self.login():
                 return False
             
-            # Publish all descriptions
+            # Create a list of descriptions for processing
+            description_items = list(descriptions.items())
             success_count = 0
-            for name, content in descriptions.items():
-                if self.publish_description(name, content):
+            
+            # Track retry counts for each description
+            retry_counts = {}
+            max_retries = 2
+            
+            # Process descriptions until all are done or failed
+            while description_items:
+                name, content = description_items.pop(0)
+                logger.info(f"Publishing description ({len(description_items)+1} remaining): '{name}'")
+                
+                retry_count = retry_counts.get(name, 0)
+                success = self.publish_description(name, content)
+                
+                if success:
                     success_count += 1
+                    logger.info(f"Successfully published '{name}'")
+                else:
+                    logger.error(f"Failed to publish '{name}'")
+                    # Add back to the list for retry if under max retries
+                    if retry_count < max_retries:
+                        retry_counts[name] = retry_count + 1
+                        description_items.append((name, content))
+                        logger.info(f"Added '{name}' back to queue for retry ({retry_count+1}/{max_retries})")
+                        
+                        # Restart the browser session if we've seen multiple failures
+                        if retry_count >= 1:
+                            logger.info("Restarting browser session due to multiple failures")
+                            if self.driver:
+                                self.driver.quit()
+                            time.sleep(2)
+                            if not self.start_browser() or not self.login():
+                                logger.error("Failed to restart browser session, aborting")
+                                break
+                
+                # Add a short delay between publishing attempts
+                time.sleep(1)
             
             logger.info(f"Content publishing completed. Published {success_count} of {len(descriptions)} descriptions")
             
-            # Clear data from TelegramInteraction when done
-            self.telegram_bot.target_descriptions = {}
-            self.telegram_bot.target_model = None
-            logger.info("Cleared data from TelegramInteraction")
+            # Clear data when done
+            data_manager.clear_data()
+            logger.info("Cleared data from DataManager")
             
             return success_count > 0
             
@@ -562,16 +656,17 @@ class ContentPublisher:
 # For standalone testing
 if __name__ == "__main__":
     # Set up test data if running independently
-    if not hasattr(TelegramInteraction, 'target_model') or not TelegramInteraction.target_model:
-        TelegramInteraction.target_model = "AGM G2 Pro"
-        print(f"Set default target_model for testing: {TelegramInteraction.target_model}")
+    if not data_manager.get_target_model():
+        data_manager.set_models("AGM G1 Pro", "AGM G2 Pro")
+        print(f"Set default target_model for testing: {data_manager.get_target_model()}")
         
-    if not hasattr(TelegramInteraction, 'target_descriptions') or not TelegramInteraction.target_descriptions:
-        TelegramInteraction.target_descriptions = {
+    if not data_manager.get_target_descriptions():
+        test_data = {
             "Hard Reset": "This is a sample reset description for testing.",
             "Developer Options": "This is how to enable developer options."
         }
-        print(f"Set default target_descriptions for testing with {len(TelegramInteraction.target_descriptions)} items")
+        data_manager.set_target_descriptions(test_data)
+        print(f"Set default target_descriptions for testing with {len(test_data)} items")
     
     # Create and run the publisher
     publisher = ContentPublisher(username="Istomin", password="VnXJ7i47n4tjWj&g")

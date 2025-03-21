@@ -2,6 +2,7 @@ import anthropic
 import os
 import logging
 import TelegramInteraction
+from DataManager import data_manager  # Import the data manager
 
 # Setup logging
 logging.basicConfig(
@@ -56,20 +57,91 @@ sys_prompt = """You are an expert at reformatting device instruction content. Fo
 
 Provide the complete reformatted HTML in a single code block that can be copied directly for website implementation. The code should be ready to paste without requiring modifications."""
 
+def process_description(description_name, input_text):
+    """
+    Process a single description using Anthropic API.
+    Returns the processed content as a string.
+    """
+    logger.info(f"Processing description: {description_name}")
+    
+    # Check if content has code block markers and remove them
+    if input_text.strip().startswith("```html"):
+        logger.info(f"Removing code block markers from '{description_name}'")
+        input_text = input_text.strip().replace("```html", "", 1)
+        if input_text.endswith("```"):
+            input_text = input_text[:-3]
+        input_text = input_text.strip()
+    
+    # Check for content too large for Anthropic API
+    if len(input_text) > 90000:  # Anthropic has token limits
+        logger.warning(f"Content for '{description_name}' is too large ({len(input_text)} chars), truncating")
+        # Find a good breaking point
+        breaking_point = input_text.rfind('</li>', 0, 80000)
+        if breaking_point == -1:
+            breaking_point = input_text.rfind('</p>', 0, 80000)
+        if breaking_point == -1:
+            breaking_point = input_text.rfind('.', 0, 80000)
+        if breaking_point == -1:
+            breaking_point = 80000
+        
+        # Truncate and add note
+        input_text = input_text[:breaking_point] + "\n<!-- Content was truncated for API processing -->"
+        logger.warning(f"Truncated '{description_name}' to {len(input_text)} chars for processing")
+    
+    try:
+        # Call Anthropic API to reformat the content
+        message = aimodel.messages.create(
+            model="claude-3-7-sonnet-20250219",
+            max_tokens=2000,
+            temperature=1,
+            system=sys_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": input_text
+                        }
+                    ]
+                }
+            ]
+        )
+        
+        # Get the processed content
+        processed_content = message.content[0].text
+        
+        # Check if the response has code blocks and extract just the HTML
+        if processed_content.strip().startswith("```html"):
+            logger.info(f"Removing code block markers from API response for '{description_name}'")
+            processed_content = processed_content.strip().replace("```html", "", 1)
+            if processed_content.endswith("```"):
+                processed_content = processed_content[:-3]
+            processed_content = processed_content.strip()
+        
+        logger.info(f"Successfully processed description: {description_name}")
+        
+        return processed_content
+        
+    except Exception as e:
+        logger.error(f"Error processing description '{description_name}': {e}")
+        return None
+
 def get_target_text():
     """
-    Process the extracted content from TelegramInteraction.target_descriptions 
-    and store the reformatted content back in the same dictionary.
+    Process the extracted content and store the reformatted content.
+    Uses DataManager for thread-safe data exchange.
     """
     try:
         logger.info("Starting Anthropic API content processing")
         
-        # Get the descriptions from TelegramInteraction
-        if not hasattr(TelegramInteraction, 'target_descriptions') or not TelegramInteraction.target_descriptions:
-            logger.error("No target_descriptions found in TelegramInteraction")
+        # Get the descriptions from DataManager
+        descriptions = data_manager.get_target_descriptions()
+        
+        if not descriptions:
+            logger.error("No target_descriptions found in DataManager")
             return False
         
-        descriptions = TelegramInteraction.target_descriptions
         logger.info(f"Found {len(descriptions)} descriptions to process")
         
         # Initialize a new dictionary to store processed content
@@ -77,40 +149,25 @@ def get_target_text():
         
         # Process each description
         for key, input_text in descriptions.items():
-            logger.info(f"Processing description: {key}")
+            processed_content = process_description(key, input_text)
             
-            try:
-                # Call Anthropic API to reformat the content
-                message = aimodel.messages.create(
-                    model="claude-3-7-sonnet-20250219",
-                    max_tokens=2000,
-                    temperature=1,
-                    system=sys_prompt,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": input_text
-                                }
-                            ]
-                        }
-                    ]
-                )
-                
-                # Store the reformatted content
-                processed_content = message.content[0].text
+            if processed_content:
+                # Store the processed content
                 processed_descriptions[key] = processed_content
-                logger.info(f"Successfully processed description: {key}")
                 
-            except Exception as e:
-                logger.error(f"Error processing description '{key}': {e}")
-                # If processing fails for one description, continue with others
-                continue
+                # Optionally save each description as it's processed for fault tolerance
+                data_manager.update_description(key, processed_content)
+            else:
+                # Keep the original content if processing failed
+                logger.warning(f"Using original content for '{key}' due to processing failure")
+                processed_descriptions[key] = input_text
         
-        # Update TelegramInteraction with processed descriptions
-        TelegramInteraction.target_descriptions = processed_descriptions
+        # Update the data manager with all processed descriptions
+        data_manager.set_target_descriptions(processed_descriptions)
+        
+        # Save to file for persistence
+        data_manager.save_descriptions_to_file()
+        
         logger.info(f"Successfully processed {len(processed_descriptions)} descriptions")
         
         return True
@@ -119,14 +176,35 @@ def get_target_text():
         logger.error(f"Error in get_target_text: {e}")
         return False
 
+def process_batch(descriptions_dict):
+    """
+    Process a batch of descriptions and return the processed results.
+    This can be called directly by other modules.
+    """
+    try:
+        logger.info(f"Processing batch of {len(descriptions_dict)} descriptions")
+        
+        results = {}
+        for key, content in descriptions_dict.items():
+            processed = process_description(key, content)
+            if processed:
+                results[key] = processed
+                
+        logger.info(f"Successfully processed batch of {len(results)} descriptions")
+        return results
+    except Exception as e:
+        logger.error(f"Error processing batch: {e}")
+        return {}
+
 # For standalone testing
 if __name__ == "__main__":
     # Set up test data if running independently
-    if not hasattr(TelegramInteraction, 'target_descriptions') or not TelegramInteraction.target_descriptions:
-        TelegramInteraction.target_descriptions = {
+    if not data_manager.get_target_descriptions():
+        test_data = {
             "Hard Reset": "<p>This is a sample reset description for testing.</p>",
             "Developer Options": "<p>This is how to enable developer options.</p>"
         }
+        data_manager.set_target_descriptions(test_data)
         print("Set up test data for Anthropic API processing")
     
     # Run the processing
@@ -135,7 +213,8 @@ if __name__ == "__main__":
     if success:
         print("Anthropic API processing completed successfully")
         # Print processed content
-        for key, value in TelegramInteraction.target_descriptions.items():
+        descriptions = data_manager.get_target_descriptions()
+        for key, value in descriptions.items():
             print(f"\n---{key}---")
             print(value[:100] + "..." if len(value) > 100 else value)
     else:
