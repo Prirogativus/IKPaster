@@ -1,8 +1,6 @@
 import logging
 import time
 import threading
-import os
-import json
 import TelegramInteraction
 import DataExtractor
 import AnthropicAPI
@@ -20,19 +18,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# File paths for communication between processes
-MODEL_DATA_FILE = "telegram_model_data.json"
-DESCRIPTIONS_FILE = "descriptions_data.json"
-
 class AutomationOrchestrator:
     """
     Orchestrates the workflow between Telegram bot, DataExtractor, AnthropicAPI, and ContentPublisher.
-    Uses DataManager for inter-module communication.
+    Uses DataManager for in-memory data exchange between components.
     """
     
     def __init__(self):
-        self.telegram_bot = TelegramInteraction
-        
+        """Initialize the orchestrator with default values."""
         # Initialize credentials
         self.username = "Istomin"
         self.password = "VnXJ7i47n4tjWj&g"
@@ -41,97 +34,40 @@ class AutomationOrchestrator:
         self.extraction_complete = False
         self.anthropic_complete = False
         
-        # Model data
-        self.example_model = None
-        self.target_model = None
-        
         logger.info("AutomationOrchestrator initialized")
-    
-    def save_models_to_data_manager(self):
-        """
-        Save the model data to DataManager for use by other components.
-        """
-        data_manager.set_models(self.example_model, self.target_model)
-        logger.info(f"Saved models to DataManager: Example={self.example_model}, Target={self.target_model}")
-    
-    def check_model_file(self):
-        """
-        Check if the model data file exists and contains valid data.
-        Returns a tuple (has_data, example_model, target_model)
-        """
-        if os.path.exists(MODEL_DATA_FILE):
-            try:
-                with open(MODEL_DATA_FILE, 'r') as f:
-                    data = json.load(f)
-                    
-                example_model = data.get('example_model')
-                target_model = data.get('target_model')
-                
-                if example_model and target_model:
-                    return True, example_model, target_model
-            
-            except Exception as e:
-                logger.error(f"Error reading model file: {e}")
-        
-        return False, None, None
     
     def wait_for_telegram_inputs(self, timeout=3600, check_interval=5):
         """
-        Wait for the model data file to be created by the Telegram bot.
+        Wait for model data to be set by the Telegram bot in DataManager.
+        Timeout after the specified duration (in seconds).
         """
-        logger.info("Waiting for Telegram bot inputs (checking for data file)...")
+        logger.info("Waiting for model inputs from Telegram bot...")
         
         start_time = time.time()
         while time.time() - start_time < timeout:
-            has_data, example_model, target_model = self.check_model_file()
-            
-            if has_data:
-                self.example_model = example_model
-                self.target_model = target_model
-                
-                # Save to DataManager for other components
-                self.save_models_to_data_manager()
-                
-                logger.info(f"Received inputs from file - Example: {example_model}, Target: {target_model}")
+            # Check if models are available in DataManager
+            if data_manager.example_model and data_manager.target_model:
+                logger.info(f"Received inputs: Example={data_manager.example_model}, Target={data_manager.target_model}")
                 return True
             
             # Log waiting status periodically (every minute)
             if (time.time() - start_time) % 60 < check_interval:
-                logger.info(f"Still waiting for model data file... ({int(time.time() - start_time)} seconds elapsed)")
+                logger.info(f"Still waiting for model data... ({int(time.time() - start_time)} seconds elapsed)")
+                
+                # Debug info
+                logger.info(f"Current DataManager state: example_model={data_manager.example_model}, target_model={data_manager.target_model}")
+                
+                # Also check TelegramInteraction directly
+                if hasattr(TelegramInteraction, 'example_model') and TelegramInteraction.example_model and \
+                   hasattr(TelegramInteraction, 'target_model') and TelegramInteraction.target_model:
+                    logger.info("Found models in TelegramInteraction but not in DataManager, synchronizing...")
+                    data_manager.set_models(TelegramInteraction.example_model, TelegramInteraction.target_model)
+                    return True
             
             time.sleep(check_interval)
         
-        logger.error(f"Timed out waiting for model data file after {timeout} seconds")
+        logger.error(f"Timed out waiting for model data after {timeout} seconds")
         return False
-    
-    def save_descriptions_to_file(self, descriptions):
-        """
-        Save the extracted descriptions to a file.
-        """
-        try:
-            with open(DESCRIPTIONS_FILE, 'w') as f:
-                json.dump(descriptions, f)
-            logger.info(f"Saved {len(descriptions)} descriptions to file")
-            return True
-        except Exception as e:
-            logger.error(f"Error saving descriptions to file: {e}")
-            return False
-    
-    def load_descriptions_from_file(self):
-        """
-        Load the extracted descriptions from a file.
-        """
-        if os.path.exists(DESCRIPTIONS_FILE):
-            try:
-                with open(DESCRIPTIONS_FILE, 'r') as f:
-                    descriptions = json.load(f)
-                logger.info(f"Loaded {len(descriptions)} descriptions from file")
-                return descriptions
-            except Exception as e:
-                logger.error(f"Error loading descriptions from file: {e}")
-        
-        logger.error("Descriptions file not found")
-        return {}
     
     def run_data_extractor(self):
         """
@@ -149,13 +85,10 @@ class AutomationOrchestrator:
             # Run the extractor
             data_extractor.run()
             
-            # Save the extracted descriptions to file and DataManager
+            # Store the extracted descriptions in DataManager
             if hasattr(data_extractor, 'example_descriptions') and data_extractor.example_descriptions:
-                # Save to file for backup
-                self.save_descriptions_to_file(data_extractor.example_descriptions)
-                
-                # Save to DataManager
                 data_manager.set_target_descriptions(data_extractor.example_descriptions)
+                logger.info(f"Stored {len(data_extractor.example_descriptions)} descriptions in DataManager")
             
             # Set flag to indicate completion
             self.extraction_complete = True
@@ -179,28 +112,19 @@ class AutomationOrchestrator:
             time.sleep(5)
         
         try:
-            # Make sure data is available in DataManager
+            # Get descriptions from DataManager
             descriptions = data_manager.get_target_descriptions()
-            if not descriptions:
-                logger.info("No descriptions in DataManager, trying to load from file")
-                descriptions = self.load_descriptions_from_file()
-                if descriptions:
-                    data_manager.set_target_descriptions(descriptions)
             
             if not descriptions:
-                logger.error("No descriptions available for processing")
+                logger.error("No descriptions available in DataManager for processing")
                 self.anthropic_complete = True
                 return
             
+            logger.info(f"Retrieved {len(descriptions)} descriptions from DataManager")
             logger.info("Starting AnthropicAPI processing...")
             
             # Run the AnthropicAPI
             success = AnthropicAPI.get_target_text()
-            
-            if success:
-                # Save processed descriptions to file for backup
-                self.save_descriptions_to_file(data_manager.get_target_descriptions())
-                logger.info("Descriptions saved to file after processing")
             
             # Set flag to indicate completion
             self.anthropic_complete = True
@@ -226,19 +150,16 @@ class AutomationOrchestrator:
         try:
             logger.info("Starting ContentPublisher...")
             
-            # Make sure data is available in DataManager
+            # Get descriptions from DataManager
             descriptions = data_manager.get_target_descriptions()
-            if not descriptions:
-                logger.info("No descriptions in DataManager, trying to load from file")
-                descriptions = self.load_descriptions_from_file()
-                if descriptions:
-                    data_manager.set_target_descriptions(descriptions)
             
             if not descriptions:
-                logger.error("No descriptions available for publishing")
+                logger.error("No descriptions available in DataManager for publishing")
                 return
             
-            # Prepare the descriptions for publishing (clean up, validate, etc.)
+            logger.info(f"Retrieved {len(descriptions)} descriptions from DataManager for publishing")
+            
+            # Prepare the descriptions for publishing
             logger.info("Preparing content for publishing...")
             data_manager.prepare_descriptions_for_publishing()
             
@@ -253,26 +174,12 @@ class AutomationOrchestrator:
             
             logger.info("ContentPublisher completed successfully" if success else "ContentPublisher failed")
             
-            # Clean up files
-            self.cleanup_files()
+            # Clear data when done
+            data_manager.clear_data()
+            logger.info("Cleared data from DataManager")
             
         except Exception as e:
             logger.error(f"Error in ContentPublisher: {e}")
-    
-    def cleanup_files(self):
-        """
-        Clean up the temporary files.
-        """
-        try:
-            if os.path.exists(MODEL_DATA_FILE):
-                os.remove(MODEL_DATA_FILE)
-                logger.info(f"Removed file: {MODEL_DATA_FILE}")
-            
-            if os.path.exists(DESCRIPTIONS_FILE):
-                os.remove(DESCRIPTIONS_FILE)
-                logger.info(f"Removed file: {DESCRIPTIONS_FILE}")
-        except Exception as e:
-            logger.error(f"Error cleaning up files: {e}")
     
     def run(self):
         """
@@ -283,7 +190,7 @@ class AutomationOrchestrator:
             
             # Wait for Telegram inputs
             if not self.wait_for_telegram_inputs():
-                logger.error("Failed to get inputs from Telegram file, aborting workflow")
+                logger.error("Failed to get inputs from Telegram, aborting workflow")
                 return False
             
             # Start DataExtractor in a separate thread
@@ -315,8 +222,18 @@ class AutomationOrchestrator:
             logger.error(f"Error in automation workflow: {e}")
             return False
 
-# Run the orchestrator when executed directly
+# Run both the Telegram bot and the Orchestrator in the same process
 if __name__ == "__main__":
-    # Initialize and run the orchestrator
+    # Start the Telegram bot in a background thread
+    telegram_thread = threading.Thread(target=TelegramInteraction.start_bot)
+    telegram_thread.daemon = True  # This will allow the main program to exit even if the thread is running
+    telegram_thread.start()
+    
+    # Give the Telegram bot a moment to initialize
+    time.sleep(2)
+    
+    print("Telegram bot started in background thread")
+    
+    # Run the orchestrator in the main thread
     orchestrator = AutomationOrchestrator()
     orchestrator.run()

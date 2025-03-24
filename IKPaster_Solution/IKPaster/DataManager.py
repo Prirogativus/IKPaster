@@ -1,7 +1,5 @@
 import logging
 import threading
-import json
-import os
 
 # Setup logging
 logging.basicConfig(
@@ -17,7 +15,7 @@ logger = logging.getLogger(__name__)
 class DataManager:
     """
     A singleton class that manages data exchange between modules with thread safety.
-    This replaces the direct use of TelegramInteraction for data sharing.
+    Uses only in-memory dictionaries for data storage.
     """
     _instance = None
     _lock = threading.Lock()
@@ -38,9 +36,6 @@ class DataManager:
         # Content data with locks for thread safety
         self.target_descriptions = {}
         self._descriptions_lock = threading.RLock()
-        
-        # File paths for persistence
-        self.descriptions_file = "descriptions_data.json"
         
         logger.info("DataManager initialized")
     
@@ -101,10 +96,6 @@ class DataManager:
             except:
                 pass
                 
-            # Finally, try to load from file
-            if self.load_descriptions_from_file():
-                return self.target_descriptions.copy()
-                
             # Return empty dict if all else fails
             return {}
     
@@ -114,35 +105,12 @@ class DataManager:
             self.target_descriptions[key] = content
             logger.info(f"Updated description: {key}")
     
-    def save_descriptions_to_file(self):
-        """Save target descriptions to file for persistence"""
-        with self._descriptions_lock:
-            try:
-                with open(self.descriptions_file, 'w') as f:
-                    json.dump(self.target_descriptions, f)
-                logger.info(f"Saved {len(self.target_descriptions)} descriptions to file")
-                return True
-            except Exception as e:
-                logger.error(f"Error saving descriptions to file: {e}")
-                return False
-    
-    def load_descriptions_from_file(self):
-        """Load target descriptions from file"""
-        if os.path.exists(self.descriptions_file):
-            try:
-                with open(self.descriptions_file, 'r') as f:
-                    with self._descriptions_lock:
-                        self.target_descriptions = json.load(f)
-                        logger.info(f"Loaded {len(self.target_descriptions)} descriptions from file")
-                return True
-            except Exception as e:
-                logger.error(f"Error loading descriptions from file: {e}")
-        return False
-    
     def clear_data(self):
         """Clear all data"""
         with self._descriptions_lock:
             self.target_descriptions = {}
+            self.example_model = None
+            self.target_model = None
             
             # Also clear TelegramInteraction for backward compatibility
             try:
@@ -152,14 +120,6 @@ class DataManager:
                 TelegramInteraction.example_model = None
             except:
                 pass
-            
-            # Delete file if it exists
-            if os.path.exists(self.descriptions_file):
-                try:
-                    os.remove(self.descriptions_file)
-                    logger.info(f"Removed file: {self.descriptions_file}")
-                except Exception as e:
-                    logger.error(f"Error removing file {self.descriptions_file}: {e}")
         
         logger.info("All data cleared")
 

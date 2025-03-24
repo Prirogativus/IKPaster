@@ -137,80 +137,6 @@ class ContentPublisher:
             logger.error(f"Error during login: {e}")
             return False
     
-    def switch_to_popup(self):
-        """Switch to a popup window."""
-        main_window = self.driver.current_window_handle
-        for handle in self.driver.window_handles:
-            if handle != main_window:
-                self.driver.switch_to.window(handle)
-                logger.info("Switched to popup window")
-                return True
-        
-        logger.error("No popup window found")
-        return False
-    
-    def switch_to_main_window(self):
-        """Close popup and switch back to main window."""
-        if len(self.driver.window_handles) > 1:
-            self.driver.close()  # Close the popup
-        
-        # Switch to the main window
-        self.driver.switch_to.window(self.driver.window_handles[0])
-        logger.info("Switched back to main window")
-        return True
-    
-    def create_dropdown_option(self, button_locator, name_value):
-        """Create a new option in a dropdown using the + button."""
-        try:
-            logger.info(f"Creating new dropdown option: {name_value}")
-            
-            # Click the + button
-            add_button = self.wait_for_element(button_locator)
-            if not add_button:
-                logger.error("Add button not found")
-                return False
-            
-            add_button.click()
-            time.sleep(2)  # Wait for popup
-            
-            # Switch to popup window
-            if not self.switch_to_popup():
-                return False
-            
-            # Fill the name field
-            name_field = self.wait_for_element(self.elements["popup_name_field"])
-            if not name_field:
-                logger.error("Name field not found in popup")
-                self.switch_to_main_window()
-                return False
-            
-            name_field.clear()
-            name_field.send_keys(name_value)
-            
-            # Click Save
-            save_button = self.wait_for_element(self.elements["popup_save_button"])
-            if not save_button:
-                logger.error("Save button not found in popup")
-                self.switch_to_main_window()
-                return False
-            
-            save_button.click()
-            time.sleep(2)  # Wait for save to complete
-            
-            # Switch back to main window
-            self.switch_to_main_window()
-            logger.info(f"Created new option: {name_value}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error creating dropdown option: {e}")
-            # Make sure we're back on the main window
-            try:
-                self.switch_to_main_window()
-            except:
-                pass
-            return False
-    
     def select_select2_option(self, select_id, option_text):
         """
         Select an option from a Select2 dropdown ensuring exact text match.
@@ -299,24 +225,6 @@ class ContentPublisher:
             logger.error(f"Error selecting from standard dropdown: {e}")
             return False
     
-    def trim_content_if_needed(self, content, max_length=65000):
-        """Trim content if it exceeds maximum allowed length."""
-        if len(content) > max_length:
-            logger.warning(f"Content too large ({len(content)} chars), trimming to {max_length} chars")
-            # Find a good breaking point - end of a tag
-            breaking_point = content.rfind('</li>', 0, max_length)
-            if breaking_point == -1:
-                breaking_point = content.rfind('</p>', 0, max_length)
-            if breaking_point == -1:
-                breaking_point = content.rfind('.', 0, max_length)
-            if breaking_point == -1:
-                breaking_point = max_length
-            
-            # Add a note about truncation
-            trimmed = content[:breaking_point] + "\n<!-- Content was trimmed due to size limitations -->"
-            return trimmed
-        return content
-    
     def enter_editor_content(self, content):
         """Enter content into the CKEditor with chunking for large content."""
         try:
@@ -340,9 +248,6 @@ class ContentPublisher:
             # Clear the textarea
             textarea.clear()
             time.sleep(1)  # Wait after clearing
-            
-            # For large text, we need to chunk it to avoid performance issues
-            # This is a common issue with Selenium and large text inputs
             if len(content) > 5000:
                 logger.info(f"Content is large ({len(content)} chars), using chunking approach")
                 # Split the content into manageable chunks
@@ -506,7 +411,7 @@ class ContentPublisher:
         return False
     
     def publish_description(self, description_name, content):
-        """Publish a single description with content size management."""
+        '''"""Publish a single description without content size management."""
         try:
             logger.info(f"Publishing description: '{description_name}'")
             
@@ -518,12 +423,6 @@ class ContentPublisher:
             if not self.target_device:
                 logger.error("No target device available. Ensure target_model is set in DataManager.")
                 return False
-            
-            # Trim content if needed to prevent browser performance issues
-            original_length = len(content)
-            content = self.trim_content_if_needed(content)
-            if len(content) < original_length:
-                logger.warning(f"Content for '{description_name}' was trimmed from {original_length} to {len(content)} chars")
             
             # Remove code block markers if present
             if content.strip().startswith("```html"):
@@ -561,6 +460,60 @@ class ContentPublisher:
         except Exception as e:
             logger.error(f"Error publishing description: {e}")
             self.driver.save_screenshot(f"error_{time.strftime('%Y%m%d-%H%M%S')}.png")
+            return False
+            """Alternative method to enter content into editor."""'''
+        try:
+            logger.info("Using alternative method to enter content")
+            
+            # Click source button to access HTML mode
+            source_button = self.wait_for_element(self.elements["source_button"])
+            if not source_button:
+                logger.error("Source button not found")
+                return False
+            
+            source_button.click()
+            time.sleep(1)
+            
+            # Find the textarea
+            textarea = self.wait_for_element(self.elements["editor_textarea"])
+            if not textarea:
+                logger.error("Editor textarea not found")
+                return False
+            
+            # Method 1: Use clipboard
+            logger.info("Trying clipboard method")
+            try:
+                # Copy content to clipboard using pyperclip
+                import pyperclip
+                pyperclip.copy(content)
+                
+                # Focus the textarea
+                textarea.click()
+                
+                # Send keyboard shortcut to paste
+                textarea.send_keys(Keys.CONTROL, 'v')
+                time.sleep(2)
+                return True
+            except Exception as e:
+                logger.error(f"Clipboard method failed: {e}")
+            
+            # Method 2: Direct JavaScript insertion
+            logger.info("Trying direct JavaScript insertion")
+            try:
+                script = """
+                arguments[0].value = arguments[1];
+                arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                """
+                self.driver.execute_script(script, textarea, content)
+                time.sleep(2)
+                return True
+            except Exception as e:
+                logger.error(f"Direct JavaScript insertion failed: {e}")
+                
+            return False
+        
+        except Exception as e:
+            logger.error(f"All content entry methods failed: {e}")
             return False
     
     def run(self):

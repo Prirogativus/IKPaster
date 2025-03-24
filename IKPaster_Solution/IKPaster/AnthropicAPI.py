@@ -64,31 +64,18 @@ def process_description(description_name, input_text):
     """
     logger.info(f"Processing description: {description_name}")
     
-    # Check if content has code block markers and remove them
-    if input_text.strip().startswith("```html"):
-        logger.info(f"Removing code block markers from '{description_name}'")
-        input_text = input_text.strip().replace("```html", "", 1)
-        if input_text.endswith("```"):
-            input_text = input_text[:-3]
-        input_text = input_text.strip()
-    
-    # Check for content too large for Anthropic API
-    if len(input_text) > 90000:  # Anthropic has token limits
-        logger.warning(f"Content for '{description_name}' is too large ({len(input_text)} chars), truncating")
-        # Find a good breaking point
-        breaking_point = input_text.rfind('</li>', 0, 80000)
-        if breaking_point == -1:
-            breaking_point = input_text.rfind('</p>', 0, 80000)
-        if breaking_point == -1:
-            breaking_point = input_text.rfind('.', 0, 80000)
-        if breaking_point == -1:
-            breaking_point = 80000
-        
-        # Truncate and add note
-        input_text = input_text[:breaking_point] + "\n<!-- Content was truncated for API processing -->"
-        logger.warning(f"Truncated '{description_name}' to {len(input_text)} chars for processing")
+    # Escape HTML variables like {{image1}} to \{\{image1\}\}
+    def escape_html_variables(content):
+        import re
+        pattern = r'\{\{([^}]+)\}\}'
+        escaped_content = re.sub(pattern, r'\\{\\{\1\\}\\}', content)
+        return escaped_content
     
     try:
+        # Escape HTML variables before sending to Anthropic API
+        processed_input = escape_html_variables(input_text)
+        logger.info(f"HTML variables escaped in '{description_name}' before API processing")
+        
         # Call Anthropic API to reformat the content
         message = aimodel.messages.create(
             model="claude-3-7-sonnet-20250219",
@@ -101,24 +88,14 @@ def process_description(description_name, input_text):
                     "content": [
                         {
                             "type": "text",
-                            "text": input_text
+                            "text": processed_input
                         }
                     ]
                 }
             ]
         )
         
-        # Get the processed content
         processed_content = message.content[0].text
-        
-        # Check if the response has code blocks and extract just the HTML
-        if processed_content.strip().startswith("```html"):
-            logger.info(f"Removing code block markers from API response for '{description_name}'")
-            processed_content = processed_content.strip().replace("```html", "", 1)
-            if processed_content.endswith("```"):
-                processed_content = processed_content[:-3]
-            processed_content = processed_content.strip()
-        
         logger.info(f"Successfully processed description: {description_name}")
         
         return processed_content
@@ -165,9 +142,6 @@ def get_target_text():
         # Update the data manager with all processed descriptions
         data_manager.set_target_descriptions(processed_descriptions)
         
-        # Save to file for persistence
-        data_manager.save_descriptions_to_file()
-        
         logger.info(f"Successfully processed {len(processed_descriptions)} descriptions")
         
         return True
@@ -175,47 +149,3 @@ def get_target_text():
     except Exception as e:
         logger.error(f"Error in get_target_text: {e}")
         return False
-
-def process_batch(descriptions_dict):
-    """
-    Process a batch of descriptions and return the processed results.
-    This can be called directly by other modules.
-    """
-    try:
-        logger.info(f"Processing batch of {len(descriptions_dict)} descriptions")
-        
-        results = {}
-        for key, content in descriptions_dict.items():
-            processed = process_description(key, content)
-            if processed:
-                results[key] = processed
-                
-        logger.info(f"Successfully processed batch of {len(results)} descriptions")
-        return results
-    except Exception as e:
-        logger.error(f"Error processing batch: {e}")
-        return {}
-
-# For standalone testing
-if __name__ == "__main__":
-    # Set up test data if running independently
-    if not data_manager.get_target_descriptions():
-        test_data = {
-            "Hard Reset": "<p>This is a sample reset description for testing.</p>",
-            "Developer Options": "<p>This is how to enable developer options.</p>"
-        }
-        data_manager.set_target_descriptions(test_data)
-        print("Set up test data for Anthropic API processing")
-    
-    # Run the processing
-    success = get_target_text()
-    
-    if success:
-        print("Anthropic API processing completed successfully")
-        # Print processed content
-        descriptions = data_manager.get_target_descriptions()
-        for key, value in descriptions.items():
-            print(f"\n---{key}---")
-            print(value[:100] + "..." if len(value) > 100 else value)
-    else:
-        print("Anthropic API processing failed")

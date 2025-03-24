@@ -1,7 +1,6 @@
 import telebot
 from telebot import types
-import json
-import os
+from DataManager import data_manager
 
 TOKEN = ''
 bot = telebot.TeleBot(TOKEN)
@@ -10,24 +9,6 @@ bot = telebot.TeleBot(TOKEN)
 example_model = None
 target_model = None
 target_descriptions = {}
-
-# File path for communication with orchestrator
-MODEL_DATA_FILE = "telegram_model_data.json"
-
-# Helper function to save model data to file
-def save_models_to_file():
-    try:
-        data = {
-            'example_model': example_model,
-            'target_model': target_model
-        }
-        with open(MODEL_DATA_FILE, 'w') as f:
-            json.dump(data, f)
-        print(f"Saved models to file: Example={example_model}, Target={target_model}")
-        return True
-    except Exception as e:
-        print(f"Error saving models to file: {e}")
-        return False
 
 # Command handler for /start
 @bot.message_handler(commands=['start'])
@@ -45,6 +26,9 @@ def process_example_model_step(message):
     global example_model
     example_model = message.text
     
+    # Update DataManager
+    data_manager.example_model = example_model
+    
     # Ask for target model
     msg = bot.send_message(message.chat.id, "Give me a target model:")
     bot.register_next_step_handler(msg, process_target_model_step)
@@ -54,8 +38,8 @@ def process_target_model_step(message):
     global target_model
     target_model = message.text
     
-    # Save models to file for the orchestrator
-    save_models_to_file()
+    # Update DataManager with both models
+    data_manager.set_models(example_model, target_model)
     
     # Thank the user and show the selected models
     response = f"Example: {example_model}, Target: {target_model}.\n\nStarting the automation process..."
@@ -65,8 +49,12 @@ def process_target_model_step(message):
 # Command to show saved models
 @bot.message_handler(commands=['show_models'])
 def show_models(message):
-    if example_model and target_model:
-        response = f"Saved models:\nExample: {example_model}\nTarget: {target_model}"
+    # Get models from DataManager for consistency
+    dm_example = data_manager.example_model or example_model
+    dm_target = data_manager.target_model or target_model
+    
+    if dm_example and dm_target:
+        response = f"Saved models:\nExample: {dm_example}\nTarget: {dm_target}"
     else:
         response = "No models saved yet. Please use /start command first."
     bot.send_message(message.chat.id, response)
@@ -81,19 +69,16 @@ def clear_data(message):
     target_model = None
     target_descriptions = {}
     
-    # Remove the data file if it exists
-    if os.path.exists(MODEL_DATA_FILE):
-        try:
-            os.remove(MODEL_DATA_FILE)
-            status = "and removed data file"
-        except:
-            status = "but failed to remove data file"
-    else:
-        status = "(no data file found)"
+    # Clear DataManager
+    data_manager.clear_data()
     
-    bot.send_message(message.chat.id, f"All data cleared {status}. Use /start to begin again.")
+    bot.send_message(message.chat.id, "All data cleared. Use /start to begin again.")
 
-# Run the bot
-if __name__ == '__main__':
+# Add a function to start the bot (for Orchestrator to use)
+def start_bot():
     print("Starting Telegram bot...")
-    bot.polling(none_stop=True)             
+    bot.polling(none_stop=True)
+
+# Run the bot if this file is executed directly
+if __name__ == '__main__':
+    start_bot()
