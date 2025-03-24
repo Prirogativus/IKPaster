@@ -139,8 +139,7 @@ class ContentPublisher:
     
     def select_select2_option(self, select_id, option_text):
         """
-        Select an option from a Select2 dropdown ensuring exact text match.
-        This will only select an option that exactly matches the provided text.
+        Select an option from a Select2 dropdown with case-insensitive matching.
         """
         try:
             logger.info(f"Selecting '{option_text}' from Select2 dropdown: {select_id}")
@@ -163,8 +162,8 @@ class ContentPublisher:
                 except:
                     logger.info("No search box found in Select2 dropdown")
                 
-                # Find exact match option using XPath
-                xpath = f"//li[contains(@class, 'select2-results__option') and text()='{option_text}']"
+                # Find option using XPath with case-insensitive contains instead of exact match
+                xpath = f"//li[contains(@class, 'select2-results__option') and translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')=translate('{option_text}', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')]"
                 try:
                     option = WebDriverWait(self.driver, 5).until(
                         EC.presence_of_element_located((By.XPATH, xpath))
@@ -172,20 +171,33 @@ class ContentPublisher:
                     
                     # Click the option
                     option.click()
-                    logger.info(f"Selected exact match '{option_text}' from Select2 dropdown")
+                    logger.info(f"Selected match '{option_text}' from Select2 dropdown (case-insensitive)")
                     time.sleep(1)  # Wait for selection to apply
                     return True
                     
                 except TimeoutException:
-                    logger.error(f"No exact match for '{option_text}' found in Select2 dropdown")
-                    
-                    # Close the dropdown by clicking elsewhere
+                    # Try partial match as fallback
+                    logger.info(f"No exact case-insensitive match found, trying partial match")
+                    xpath_partial = f"//li[contains(@class, 'select2-results__option') and contains(translate(text(), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), translate('{option_text}', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'))]"
                     try:
-                        self.driver.find_element(By.TAG_NAME, "body").click()
-                    except:
-                        pass
-                    
-                    return False
+                        option = WebDriverWait(self.driver, 5).until(
+                            EC.presence_of_element_located((By.XPATH, xpath_partial))
+                        )
+                        option_text_actual = option.text
+                        option.click()
+                        logger.info(f"Selected partial match '{option_text_actual}' for '{option_text}' from Select2 dropdown")
+                        time.sleep(1)
+                        return True
+                    except TimeoutException:
+                        logger.error(f"No match for '{option_text}' found in Select2 dropdown")
+                        
+                        # Close the dropdown by clicking elsewhere
+                        try:
+                            self.driver.find_element(By.TAG_NAME, "body").click()
+                        except:
+                            pass
+                        
+                        return False
             
             except NoSuchElementException:
                 # Not a Select2 dropdown, try standard dropdown
@@ -226,9 +238,10 @@ class ContentPublisher:
             return False
     
     def enter_editor_content(self, content):
-        """Enter content into the CKEditor with chunking for large content."""
+        """Enter content into the CKEditor using JavaScript for reliability."""
         try:
             logger.info("Entering content into editor")
+            logger.info(f"Content length: {len(content)}")
             
             # Click source button to access HTML mode
             source_button = self.wait_for_element(self.elements["source_button"])
@@ -237,7 +250,7 @@ class ContentPublisher:
                 return False
             
             source_button.click()
-            time.sleep(1)  # Wait for editor mode to change
+            time.sleep(2)  # Wait for editor mode to change
             
             # Find the textarea
             textarea = self.wait_for_element(self.elements["editor_textarea"])
@@ -247,30 +260,26 @@ class ContentPublisher:
             
             # Clear the textarea
             textarea.clear()
-            time.sleep(1)  # Wait after clearing
-            if len(content) > 5000:
-                logger.info(f"Content is large ({len(content)} chars), using chunking approach")
-                # Split the content into manageable chunks
-                chunk_size = 1000
-                chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
-                
-                # Insert content chunk by chunk with small pauses
-                for i, chunk in enumerate(chunks):
-                    logger.info(f"Inserting chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-                    # Execute JavaScript to insert the chunk at the current position
-                    js_script = f"arguments[0].value += arguments[1];"
-                    self.driver.execute_script(js_script, textarea, chunk)
-                    time.sleep(0.5)  # Give browser time to process
-                    
-                    # Every few chunks, perform a refocus to ensure browser stability
-                    if (i+1) % 5 == 0:
-                        logger.info("Refocusing textarea")
-                        self.driver.execute_script("arguments[0].focus();", textarea)
-                        time.sleep(0.5)
-            else:
-                # For smaller content, use direct send_keys
-                textarea.send_keys(content)
-                
+            time.sleep(2)  # Wait after clearing
+            
+            # Directly set value with JavaScript - most reliable approach
+            logger.info("Using JavaScript to set content directly")
+            js_script = "arguments[0].value = arguments[1];"
+            self.driver.execute_script(js_script, textarea, content)
+            time.sleep(2)
+            
+            # Trigger a change event so the editor recognizes the content
+            change_script = "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));"
+            self.driver.execute_script(change_script, textarea)
+            time.sleep(1)
+            
+            # Verify content was entered
+            actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+            logger.info(f"Actual content length after insert: {len(actual_content)}")
+            
+            if len(actual_content) < len(content) * 0.9:  # If less than 90% was entered
+                logger.warning("Content may not have been fully entered")
+            
             logger.info("Content entered successfully")
             return True
             
@@ -411,7 +420,7 @@ class ContentPublisher:
         return False
     
     def publish_description(self, description_name, content):
-        '''"""Publish a single description without content size management."""
+        """Publish a single description without content size management."""
         try:
             logger.info(f"Publishing description: '{description_name}'")
             
@@ -423,15 +432,7 @@ class ContentPublisher:
             if not self.target_device:
                 logger.error("No target device available. Ensure target_model is set in DataManager.")
                 return False
-            
-            # Remove code block markers if present
-            if content.strip().startswith("```html"):
-                logger.info(f"Removing code block markers from '{description_name}'")
-                content = content.strip().replace("```html", "", 1)
-                if content.endswith("```"):
-                    content = content[:-3]
-                content = content.strip()
-            
+
             # Navigate to add description page
             self.driver.get(self.urls["add_description"])
             time.sleep(3)  # Wait for page load
@@ -446,8 +447,100 @@ class ContentPublisher:
                 logger.error(f"Failed to select '{self.target_device}' from dropdown")
                 return False
             
-            # Enter content
-            if not self.enter_editor_content(content):
+            # Enter content using enhanced methods
+            logger.info("Using enhanced content entry methods")
+            
+            # Click source button to access HTML mode
+            source_button = self.wait_for_element(self.elements["source_button"])
+            if not source_button:
+                logger.error("Source button not found")
+                return False
+            
+            source_button.click()
+            time.sleep(2)
+            
+            # Find the textarea
+            textarea = self.wait_for_element(self.elements["editor_textarea"])
+            if not textarea:
+                logger.error("Editor textarea not found")
+                return False
+            
+            # Clear the textarea
+            textarea.clear()
+            time.sleep(2)
+            
+            # Try multiple methods to enter content
+            content_entered = False
+            
+            # Method 1: Try clipboard method
+            try:
+                logger.info("Trying clipboard method")
+                import pyperclip
+                pyperclip.copy(content)
+                
+                # Focus the textarea
+                textarea.click()
+                
+                # Send keyboard shortcut to paste
+                textarea.send_keys(Keys.CONTROL, 'v')
+                time.sleep(2)
+                
+                # Verify content length
+                actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+                if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
+                    logger.info("Content entered successfully via clipboard")
+                    content_entered = True
+                else:
+                    logger.warning("Clipboard method did not enter all content")
+            except Exception as e:
+                logger.error(f"Clipboard method failed: {e}")
+            
+            # Method 2: If clipboard failed, try direct JavaScript
+            if not content_entered:
+                try:
+                    logger.info("Trying direct JavaScript insertion")
+                    script = """
+                    arguments[0].value = arguments[1];
+                    arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                    """
+                    self.driver.execute_script(script, textarea, content)
+                    time.sleep(2)
+                    
+                    # Verify content length
+                    actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+                    if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
+                        logger.info("Content entered successfully via JavaScript")
+                        content_entered = True
+                    else:
+                        logger.warning("JavaScript method did not enter all content")
+                except Exception as e:
+                    logger.error(f"Direct JavaScript insertion failed: {e}")
+            
+            # If both methods failed, try chunking as a last resort
+            if not content_entered:
+                try:
+                    logger.info("Trying chunking method")
+                    chunk_size = 500
+                    chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+                    
+                    for i, chunk in enumerate(chunks):
+                        logger.info(f"Inserting chunk {i+1}/{len(chunks)}")
+                        js_script = "arguments[0].value += arguments[1];"
+                        self.driver.execute_script(js_script, textarea, chunk)
+                        time.sleep(1)
+                        
+                        # Refocus every few chunks
+                        if (i+1) % 2 == 0:
+                            self.driver.execute_script("arguments[0].focus();", textarea)
+                            time.sleep(0.5)
+                    
+                    logger.info("Content entered using chunking method")
+                    content_entered = True
+                except Exception as e:
+                    logger.error(f"Chunking method failed: {e}")
+            
+            if not content_entered:
+                logger.error("All content entry methods failed")
                 return False
             
             # Save the form using our enhanced save method
@@ -460,60 +553,6 @@ class ContentPublisher:
         except Exception as e:
             logger.error(f"Error publishing description: {e}")
             self.driver.save_screenshot(f"error_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            return False
-            """Alternative method to enter content into editor."""'''
-        try:
-            logger.info("Using alternative method to enter content")
-            
-            # Click source button to access HTML mode
-            source_button = self.wait_for_element(self.elements["source_button"])
-            if not source_button:
-                logger.error("Source button not found")
-                return False
-            
-            source_button.click()
-            time.sleep(1)
-            
-            # Find the textarea
-            textarea = self.wait_for_element(self.elements["editor_textarea"])
-            if not textarea:
-                logger.error("Editor textarea not found")
-                return False
-            
-            # Method 1: Use clipboard
-            logger.info("Trying clipboard method")
-            try:
-                # Copy content to clipboard using pyperclip
-                import pyperclip
-                pyperclip.copy(content)
-                
-                # Focus the textarea
-                textarea.click()
-                
-                # Send keyboard shortcut to paste
-                textarea.send_keys(Keys.CONTROL, 'v')
-                time.sleep(2)
-                return True
-            except Exception as e:
-                logger.error(f"Clipboard method failed: {e}")
-            
-            # Method 2: Direct JavaScript insertion
-            logger.info("Trying direct JavaScript insertion")
-            try:
-                script = """
-                arguments[0].value = arguments[1];
-                arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-                """
-                self.driver.execute_script(script, textarea, content)
-                time.sleep(2)
-                return True
-            except Exception as e:
-                logger.error(f"Direct JavaScript insertion failed: {e}")
-                
-            return False
-        
-        except Exception as e:
-            logger.error(f"All content entry methods failed: {e}")
             return False
     
     def run(self):

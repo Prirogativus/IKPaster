@@ -127,6 +127,10 @@ def get_target_text():
         # Process each description
         for key, input_text in descriptions.items():
             processed_content = process_description(key, input_text)
+            if key == 'Codes':
+                processed_descriptions[key] = processed_content
+                data_manager.update_description(key, processed_content)
+                continue
             
             if processed_content:
                 # Store the processed content
