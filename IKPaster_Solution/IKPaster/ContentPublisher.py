@@ -8,7 +8,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, ElementClickInterceptedException
 from selenium.webdriver.common.keys import Keys
 import TelegramInteraction
-from DataManager import data_manager  # Import the data manager
+from DataManager import data_manager
 
 # Set up logging
 logging.basicConfig(
@@ -38,13 +38,11 @@ ELEMENTS = {
     "editor_textarea": (By.XPATH, "//textarea[contains(@class, 'cke_source')]"),
     "popup_name_field": (By.ID, "id_name"),
     "popup_save_button": (By.XPATH, "//input[@value='Save']"),
-    # Primary save button (Save and add another)
     "primary_save_button": [
         (By.XPATH, "//input[@value='Save and add another']"),
         (By.XPATH, "//input[@name='_addanother']"),
         (By.CSS_SELECTOR, ".submit-row input[value='Save and add another']")
     ],
-    # Fallback save button (only used if primary fails)
     "fallback_save_button": [
         (By.XPATH, "//input[@value='Save']"),
         (By.CSS_SELECTOR, ".submit-row input[value='Save']"),
@@ -65,30 +63,41 @@ class ContentPublisher:
         self.urls = URLS
         self.elements = ELEMENTS
         self.driver = None
-        
-        # Target device will be obtained from DataManager
         self.target_device = None
-        
+        self.skip_list = []  # Items to skip after multiple failures
         logger.info("ContentPublisher initialized")
     
     def start_browser(self):
-        """Start the Chrome browser."""
+        """Start the Chrome browser with improved stability and session handling."""
         options = Options()
         options.add_argument("--start-maximized")
-        # Add these options for better stability
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
-        # Increase page load timeout for better stability
-        options.page_load_strategy = 'eager'
         
-        self.driver = webdriver.Chrome(options=options)
-        # Set longer timeouts for stability
-        self.driver.set_script_timeout(120)
-        self.driver.set_page_load_timeout(120)
-        logger.info("Browser started")
-        return True
+        # Add these options for better session stability
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-browser-side-navigation")
+        options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+        options.add_argument("--disable-popup-blocking")
+        
+        # Change page load strategy to normal
+        options.page_load_strategy = 'normal'
+        
+        try:
+            self.driver = webdriver.Chrome(options=options)
+            self.driver.set_script_timeout(180)
+            self.driver.set_page_load_timeout(180)
+            
+            # Set a cookie to help maintain the session
+            self.driver.get(self.urls["login"])
+            self.driver.add_cookie({"name": "session_stability", "value": "true"})
+            
+            logger.info("Browser started with improved session handling")
+            return True
+        except Exception as e:
+            logger.error(f"Error starting browser: {e}")
+            return False
     
     def wait_for_element(self, locator, timeout=15):
         """Wait for an element to appear and return it."""
@@ -106,6 +115,7 @@ class ContentPublisher:
         try:
             logger.info("Logging in...")
             self.driver.get(self.urls["login"])
+            time.sleep(3)  # Wait for page to load
             
             # Fill in username and password
             username_field = self.wait_for_element(self.elements["username_field"])
@@ -118,12 +128,14 @@ class ContentPublisher:
             
             username_field.clear()
             username_field.send_keys(self.username)
+            time.sleep(1)
             
             password_field.clear()
             password_field.send_keys(self.password)
+            time.sleep(1)
             
             login_button.click()
-            time.sleep(2)  # Wait for login to complete
+            time.sleep(3)  # Wait for login to complete
             
             # Check if login was successful
             if "site administration" in self.driver.title.lower():
@@ -150,14 +162,14 @@ class ContentPublisher:
                 
                 # Click to open the dropdown
                 select2_container.click()
-                time.sleep(1)  # Wait for dropdown to open
+                time.sleep(2)  # Wait for dropdown to open
                 
                 # Look for search field
                 try:
                     search_box = self.driver.find_element(By.CSS_SELECTOR, ".select2-search__field")
                     search_box.clear()
                     search_box.send_keys(option_text)
-                    time.sleep(1)  # Wait for search results
+                    time.sleep(2)  # Wait for search results
                     logger.info(f"Searching for '{option_text}' in Select2 dropdown")
                 except:
                     logger.info("No search box found in Select2 dropdown")
@@ -172,7 +184,7 @@ class ContentPublisher:
                     # Click the option
                     option.click()
                     logger.info(f"Selected match '{option_text}' from Select2 dropdown (case-insensitive)")
-                    time.sleep(1)  # Wait for selection to apply
+                    time.sleep(2)  # Wait for selection to apply
                     return True
                     
                 except TimeoutException:
@@ -186,7 +198,7 @@ class ContentPublisher:
                         option_text_actual = option.text
                         option.click()
                         logger.info(f"Selected partial match '{option_text_actual}' for '{option_text}' from Select2 dropdown")
-                        time.sleep(1)
+                        time.sleep(2)
                         return True
                     except TimeoutException:
                         logger.error(f"No match for '{option_text}' found in Select2 dropdown")
@@ -262,25 +274,84 @@ class ContentPublisher:
             textarea.clear()
             time.sleep(2)  # Wait after clearing
             
-            # Directly set value with JavaScript - most reliable approach
-            logger.info("Using JavaScript to set content directly")
-            js_script = "arguments[0].value = arguments[1];"
-            self.driver.execute_script(js_script, textarea, content)
-            time.sleep(2)
+            # Try multiple methods to enter content
+            content_entered = False
             
-            # Trigger a change event so the editor recognizes the content
-            change_script = "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));"
-            self.driver.execute_script(change_script, textarea)
-            time.sleep(1)
+            # Method 1: Try direct JavaScript insertion (most reliable)
+            try:
+                logger.info("Trying direct JavaScript insertion")
+                script = """
+                arguments[0].value = arguments[1];
+                arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
+                """
+                self.driver.execute_script(script, textarea, content)
+                time.sleep(3)
+                
+                # Verify content length
+                actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+                if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
+                    logger.info("Content entered successfully via JavaScript")
+                    content_entered = True
+                else:
+                    logger.warning(f"JavaScript method did not enter all content: {len(actual_content)}/{len(content)} chars")
+            except Exception as e:
+                logger.error(f"Direct JavaScript insertion failed: {e}")
             
-            # Verify content was entered
-            actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
-            logger.info(f"Actual content length after insert: {len(actual_content)}")
+            # Method 2: If JavaScript failed, try clipboard
+            if not content_entered:
+                try:
+                    logger.info("Trying clipboard method")
+                    import pyperclip
+                    pyperclip.copy(content)
+                    
+                    # Focus the textarea
+                    textarea.click()
+                    time.sleep(1)
+                    
+                    # Send keyboard shortcut to paste
+                    textarea.send_keys(Keys.CONTROL, 'v')
+                    time.sleep(3)
+                    
+                    # Verify content length
+                    actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+                    if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
+                        logger.info("Content entered successfully via clipboard")
+                        content_entered = True
+                    else:
+                        logger.warning(f"Clipboard method did not enter all content: {len(actual_content)}/{len(content)} chars")
+                except Exception as e:
+                    logger.error(f"Clipboard method failed: {e}")
             
-            if len(actual_content) < len(content) * 0.9:  # If less than 90% was entered
-                logger.warning("Content may not have been fully entered")
+            # Method 3: If both methods failed, try chunking as a last resort
+            if not content_entered:
+                try:
+                    logger.info("Trying chunking method")
+                    chunk_size = 500
+                    chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
+                    
+                    for i, chunk in enumerate(chunks):
+                        logger.info(f"Inserting chunk {i+1}/{len(chunks)}")
+                        js_script = "arguments[0].value += arguments[1];"
+                        self.driver.execute_script(js_script, textarea, chunk)
+                        time.sleep(1)
+                        
+                        # Refocus every few chunks
+                        if (i+1) % 2 == 0:
+                            self.driver.execute_script("arguments[0].focus();", textarea)
+                            time.sleep(0.5)
+                    
+                    # Verify content length
+                    actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
+                    logger.info(f"Content entered using chunking method: {len(actual_content)}/{len(content)} chars")
+                    content_entered = True
+                except Exception as e:
+                    logger.error(f"Chunking method failed: {e}")
             
-            logger.info("Content entered successfully")
+            if not content_entered:
+                logger.error("All content entry methods failed")
+                return False
+                
+            logger.info("Content entry completed")
             return True
             
         except Exception as e:
@@ -294,6 +365,7 @@ class ContentPublisher:
         """
         try:
             logger.info("Trying to save form")
+            time.sleep(2)  # Add delay before saving
             
             # Take screenshot before saving
             self.driver.save_screenshot(f"before_save_{time.strftime('%Y%m%d-%H%M%S')}.png")
@@ -422,126 +494,54 @@ class ContentPublisher:
     def publish_description(self, description_name, content):
         """Publish a single description without content size management."""
         try:
+            # Skip certain items if needed
+            if description_name in self.skip_list:
+                logger.info(f"Skipping '{description_name}' as it's in the skip list")
+                return False
+
             logger.info(f"Publishing description: '{description_name}'")
             
             # Get the target device from DataManager if not already set
             if not self.target_device:
                 self.target_device = data_manager.get_target_model()
+                # Normalize the case for "PRO" to "Pro"
+                if "PRO" in self.target_device:
+                    self.target_device = self.target_device.replace("PRO", "Pro")
                 logger.info(f"Using target device from DataManager: {self.target_device}")
             
             if not self.target_device:
                 logger.error("No target device available. Ensure target_model is set in DataManager.")
                 return False
+            
+            # Add an initial delay to pace requests
+            time.sleep(2)
 
             # Navigate to add description page
             self.driver.get(self.urls["add_description"])
-            time.sleep(3)  # Wait for page load
+            time.sleep(5)  # Increased wait time for page load
             
             # Select the description name from dropdown
             if not self.select_select2_option("id_other_name", description_name):
                 logger.error(f"Failed to select '{description_name}' from dropdown")
                 return False
             
+            # Add a delay between dropdown selections
+            time.sleep(3)
+            
             # Select the device from dropdown
             if not self.select_select2_option("id_reset_info", self.target_device):
                 logger.error(f"Failed to select '{self.target_device}' from dropdown")
                 return False
             
-            # Enter content using enhanced methods
-            logger.info("Using enhanced content entry methods")
+            # Add another delay before content entry
+            time.sleep(3)
             
-            # Click source button to access HTML mode
-            source_button = self.wait_for_element(self.elements["source_button"])
-            if not source_button:
-                logger.error("Source button not found")
+            # Enter content
+            if not self.enter_editor_content(content):
                 return False
             
-            source_button.click()
-            time.sleep(2)
-            
-            # Find the textarea
-            textarea = self.wait_for_element(self.elements["editor_textarea"])
-            if not textarea:
-                logger.error("Editor textarea not found")
-                return False
-            
-            # Clear the textarea
-            textarea.clear()
-            time.sleep(2)
-            
-            # Try multiple methods to enter content
-            content_entered = False
-            
-            # Method 1: Try clipboard method
-            try:
-                logger.info("Trying clipboard method")
-                import pyperclip
-                pyperclip.copy(content)
-                
-                # Focus the textarea
-                textarea.click()
-                
-                # Send keyboard shortcut to paste
-                textarea.send_keys(Keys.CONTROL, 'v')
-                time.sleep(2)
-                
-                # Verify content length
-                actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
-                if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
-                    logger.info("Content entered successfully via clipboard")
-                    content_entered = True
-                else:
-                    logger.warning("Clipboard method did not enter all content")
-            except Exception as e:
-                logger.error(f"Clipboard method failed: {e}")
-            
-            # Method 2: If clipboard failed, try direct JavaScript
-            if not content_entered:
-                try:
-                    logger.info("Trying direct JavaScript insertion")
-                    script = """
-                    arguments[0].value = arguments[1];
-                    arguments[0].dispatchEvent(new Event('change', { bubbles: true }));
-                    """
-                    self.driver.execute_script(script, textarea, content)
-                    time.sleep(2)
-                    
-                    # Verify content length
-                    actual_content = self.driver.execute_script("return arguments[0].value;", textarea)
-                    if len(actual_content) >= len(content) * 0.9:  # At least 90% entered
-                        logger.info("Content entered successfully via JavaScript")
-                        content_entered = True
-                    else:
-                        logger.warning("JavaScript method did not enter all content")
-                except Exception as e:
-                    logger.error(f"Direct JavaScript insertion failed: {e}")
-            
-            # If both methods failed, try chunking as a last resort
-            if not content_entered:
-                try:
-                    logger.info("Trying chunking method")
-                    chunk_size = 500
-                    chunks = [content[i:i+chunk_size] for i in range(0, len(content), chunk_size)]
-                    
-                    for i, chunk in enumerate(chunks):
-                        logger.info(f"Inserting chunk {i+1}/{len(chunks)}")
-                        js_script = "arguments[0].value += arguments[1];"
-                        self.driver.execute_script(js_script, textarea, chunk)
-                        time.sleep(1)
-                        
-                        # Refocus every few chunks
-                        if (i+1) % 2 == 0:
-                            self.driver.execute_script("arguments[0].focus();", textarea)
-                            time.sleep(0.5)
-                    
-                    logger.info("Content entered using chunking method")
-                    content_entered = True
-                except Exception as e:
-                    logger.error(f"Chunking method failed: {e}")
-            
-            if not content_entered:
-                logger.error("All content entry methods failed")
-                return False
+            # Add delay before saving
+            time.sleep(3)
             
             # Save the form using our enhanced save method
             if not self.save_form():
@@ -558,7 +558,7 @@ class ContentPublisher:
     def run(self):
         """
         Run the complete publishing process using data from DataManager.
-        Includes retry mechanism and better error handling.
+        Implements batch processing to reduce server load.
         """
         try:
             logger.info("Starting content publisher")
@@ -579,61 +579,116 @@ class ContentPublisher:
             logger.info(f"Running with target device: {self.target_device}")
             logger.info(f"Found {len(descriptions)} descriptions to publish")
             
-            # Start browser
-            if not self.start_browser():
-                return False
-            
-            # Login
-            if not self.login():
-                return False
-            
-            # Create a list of descriptions for processing
+            # Process in smaller batches to reduce server load
+            max_items_per_batch = 5  # Adjust as needed
             description_items = list(descriptions.items())
-            success_count = 0
+            total_success = 0
             
-            # Track retry counts for each description
-            retry_counts = {}
-            max_retries = 2
-            
-            # Process descriptions until all are done or failed
-            while description_items:
-                name, content = description_items.pop(0)
-                logger.info(f"Publishing description ({len(description_items)+1} remaining): '{name}'")
+            # Process in batches
+            for batch_start in range(0, len(description_items), max_items_per_batch):
+                batch = description_items[batch_start:batch_start + max_items_per_batch]
+                logger.info(f"Processing batch {batch_start//max_items_per_batch + 1} with {len(batch)} items")
                 
-                retry_count = retry_counts.get(name, 0)
-                success = self.publish_description(name, content)
+                # Start browser for this batch
+                if not self.start_browser():
+                    logger.error("Failed to start browser for this batch, skipping")
+                    continue
+                    
+                if not self.login():
+                    logger.error("Failed to login for this batch, skipping")
+                    if self.driver:
+                        self.driver.quit()
+                        self.driver = None
+                    continue
                 
-                if success:
-                    success_count += 1
-                    logger.info(f"Successfully published '{name}'")
-                else:
-                    logger.error(f"Failed to publish '{name}'")
-                    # Add back to the list for retry if under max retries
-                    if retry_count < max_retries:
-                        retry_counts[name] = retry_count + 1
-                        description_items.append((name, content))
-                        logger.info(f"Added '{name}' back to queue for retry ({retry_count+1}/{max_retries})")
+                # Process items in this batch
+                batch_success = 0
+                retry_counts = {}
+                retry_delays = {}
+                max_retries = 3
+                
+                # Create a copy of the batch to allow for retries
+                batch_items = batch.copy()
+                
+                while batch_items:
+                    name, content = batch_items.pop(0)
+                    
+                    # Skip if in skip list
+                    if name in self.skip_list:
+                        logger.info(f"Skipping '{name}' as it's in the skip list")
+                        continue
+                    
+                    # Get current retry info
+                    retry_count = retry_counts.get(name, 0)
+                    delay = retry_delays.get(name, 1)  # Start with 1 second
+                    
+                    logger.info(f"Publishing description (Batch {batch_start//max_items_per_batch + 1}, {len(batch_items)} remaining): '{name}'")
+                    
+                    # Add delay if this is a retry
+                    if retry_count > 0:
+                        logger.info(f"Waiting {delay} seconds before retry {retry_count}/{max_retries}")
+                        time.sleep(delay)
+                    
+                    # Try to publish the description
+                    success = self.publish_description(name, content)
+                    
+                    if success:
+                        batch_success += 1
+                        total_success += 1
+                        logger.info(f"Successfully published '{name}'")
+                    else:
+                        logger.error(f"Failed to publish '{name}'")
                         
-                        # Restart the browser session if we've seen multiple failures
-                        if retry_count >= 1:
-                            logger.info("Restarting browser session due to multiple failures")
-                            if self.driver:
-                                self.driver.quit()
-                            time.sleep(2)
-                            if not self.start_browser() or not self.login():
-                                logger.error("Failed to restart browser session, aborting")
-                                break
+                        # Add back for retry if under max attempts
+                        if retry_count < max_retries:
+                            retry_counts[name] = retry_count + 1
+                            # Exponential backoff - double the delay
+                            retry_delays[name] = min(delay * 2, 30)
+                            batch_items.append((name, content))
+                            logger.info(f"Added '{name}' back to queue for retry ({retry_count+1}/{max_retries})")
+                            
+                            # Restart browser on multiple failures
+                            if retry_count >= 1:
+                                logger.info("Restarting browser due to multiple failures")
+                                if self.driver:
+                                    self.driver.quit()
+                                    self.driver = None
+                                time.sleep(5)
+                                if not self.start_browser() or not self.login():
+                                    logger.error("Failed to restart browser, skipping remaining items in batch")
+                                    # Add remaining items to skip list
+                                    for remaining_name, _ in batch_items:
+                                        if remaining_name not in self.skip_list:
+                                            self.skip_list.append(remaining_name)
+                                    batch_items.clear()
+                                    break
+                        else:
+                            # Add to skip list after too many retries
+                            logger.warning(f"Adding '{name}' to skip list after {retry_count + 1} failed attempts")
+                            self.skip_list.append(name)
+                    
+                    # Add delay between items
+                    time.sleep(3)
                 
-                # Add a short delay between publishing attempts
-                time.sleep(1)
+                # Close browser between batches
+                if self.driver:
+                    self.driver.quit()
+                    self.driver = None
+                
+                logger.info(f"Batch {batch_start//max_items_per_batch + 1} complete. Published {batch_success} of {len(batch)} items")
+                
+                # Add substantial delay between batches
+                if batch_start + max_items_per_batch < len(description_items):
+                    logger.info("Waiting 15 seconds before starting next batch")
+                    time.sleep(15)
             
-            logger.info(f"Content publishing completed. Published {success_count} of {len(descriptions)} descriptions")
+            logger.info(f"Content publishing completed. Published {total_success} of {len(descriptions)} descriptions")
             
             # Clear data when done
             data_manager.clear_data()
             logger.info("Cleared data from DataManager")
             
-            return success_count > 0
+            return total_success > 0
             
         except Exception as e:
             logger.error(f"Error running publisher: {e}")
@@ -643,28 +698,3 @@ class ContentPublisher:
             if self.driver:
                 logger.info("Closing browser")
                 self.driver.quit()
-
-
-# For standalone testing
-if __name__ == "__main__":
-    # Set up test data if running independently
-    if not data_manager.get_target_model():
-        data_manager.set_models("AGM G1 Pro", "AGM G2 Pro")
-        print(f"Set default target_model for testing: {data_manager.get_target_model()}")
-        
-    if not data_manager.get_target_descriptions():
-        test_data = {
-            "Hard Reset": "This is a sample reset description for testing.",
-            "Developer Options": "This is how to enable developer options."
-        }
-        data_manager.set_target_descriptions(test_data)
-        print(f"Set default target_descriptions for testing with {len(test_data)} items")
-    
-    # Create and run the publisher
-    publisher = ContentPublisher(username="Istomin", password="VnXJ7i47n4tjWj&g")
-    success = publisher.run()
-    
-    if success:
-        print("Publishing completed successfully")
-    else:
-        print("Publishing failed")
