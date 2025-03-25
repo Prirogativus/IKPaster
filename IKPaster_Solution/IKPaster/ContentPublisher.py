@@ -55,7 +55,6 @@ class ContentPublisher:
     A tool for publishing content to a Django admin site with Select2 dropdown support.
     Uses DataManager for data exchange with other modules.
     """
-    
     def __init__(self, username, password):
         """Set up the publisher with login credentials."""
         self.username = username
