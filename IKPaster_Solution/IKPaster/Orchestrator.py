@@ -1,22 +1,63 @@
 import logging
 import time
 import threading
+import json
+import os
 import TelegramInteraction
 import DataExtractor
 import AnthropicAPI
 import ContentPublisher
 from DataManager import data_manager
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("orchestrator.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+def setup_logger():
+    """Configure logging based on the instance configuration."""
+    try:
+        # Load configuration
+        with open("config.json", "r") as f:
+            config = json.load(f)
+        
+        instance_id = config.get("instance_id", 0)
+        log_dir = config.get("log_dir", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        log_file = os.path.join(log_dir, "orchestrator.log")
+        
+        # Set up logging
+        logger = logging.getLogger("orchestrator")
+        logger.setLevel(logging.INFO)
+        
+        # Remove any existing handlers
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        
+        # Add file handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter(f'[Instance {instance_id}] %(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        
+        # Add console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(f'[Instance {instance_id}] %(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(console_handler)
+        
+        return logger
+        
+    except Exception as e:
+        # Fallback logging if config fails
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler("orchestrator.log"),
+                logging.StreamHandler()
+            ]
+        )
+        logger = logging.getLogger("orchestrator")
+        logger.error(f"Error setting up logger: {e}")
+        return logger
+
+# Global logger instance
+logger = setup_logger()
 
 class AutomationOrchestrator:
     """
@@ -25,16 +66,31 @@ class AutomationOrchestrator:
     """
     
     def __init__(self):
-        """Initialize the orchestrator with default values."""
-        # Initialize credentials
-        self.username = "Istomin"
-        self.password = "VnXJ7i47n4tjWj&g"
-        
-        # Status flags
-        self.extraction_complete = False
-        self.anthropic_complete = False
-        
-        logger.info("AutomationOrchestrator initialized")
+        """Initialize the orchestrator with values from config file."""
+        try:
+            # Load configuration
+            with open("config.json", "r") as f:
+                config = json.load(f)
+            
+            credentials = config.get("admin_credentials", {})
+            self.username = credentials.get("username", "Istomin")
+            self.password = credentials.get("password", "VnXJ7i47n4tjWj&g")
+            self.instance_id = config.get("instance_id", 0)
+            
+            # Status flags
+            self.extraction_complete = False
+            self.anthropic_complete = False
+            
+            logger.info(f"AutomationOrchestrator initialized for instance {self.instance_id}")
+            
+        except Exception as e:
+            logger.error(f"Error initializing AutomationOrchestrator: {e}")
+            # Default values as fallback
+            self.username = "Istomin"
+            self.password = "VnXJ7i47n4tjWj&g"
+            self.instance_id = 0
+            self.extraction_complete = False
+            self.anthropic_complete = False
     
     def wait_for_telegram_inputs(self, timeout=3600, check_interval=5):
         """
@@ -186,7 +242,7 @@ class AutomationOrchestrator:
         Main execution method that orchestrates the entire workflow.
         """
         try:
-            logger.info("Starting the automation workflow...")
+            logger.info(f"Starting the automation workflow for instance {self.instance_id}...")
             
             # Wait for Telegram inputs
             if not self.wait_for_telegram_inputs():
@@ -215,15 +271,16 @@ class AutomationOrchestrator:
             publisher_thread.join()
             logger.info("ContentPublisher thread completed")
             
-            logger.info("Automation workflow completed")
+            logger.info(f"Automation workflow completed for instance {self.instance_id}")
             return True
             
         except Exception as e:
             logger.error(f"Error in automation workflow: {e}")
             return False
 
-# Run both the Telegram bot and the Orchestrator in the same process
+# Only run the following code if this file is executed directly
 if __name__ == "__main__":
+    # This is for backwards compatibility when running the orchestrator standalone
     # Start the Telegram bot in a background thread
     telegram_thread = threading.Thread(target=TelegramInteraction.start_bot)
     telegram_thread.daemon = True  # This will allow the main program to exit even if the thread is running

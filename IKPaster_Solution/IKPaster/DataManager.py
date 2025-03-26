@@ -46,9 +46,9 @@ class DataManager:
         logger.info(f"Models set: Example={example_model}, Target={target_model}")
         
         # Import here to avoid circular imports
-        import TelegramInteraction
-        TelegramInteraction.example_model = example_model
-        TelegramInteraction.target_model = target_model
+        import IKPaster_Solution.IKPaster.ConsoleInteraction as ConsoleInteraction
+        ConsoleInteraction.example_model = example_model
+        ConsoleInteraction.target_model = target_model
     
     def get_target_model(self):
         """Get the current target model"""
@@ -58,9 +58,9 @@ class DataManager:
             
         # Fall back to TelegramInteraction if needed
         try:
-            import TelegramInteraction
-            if hasattr(TelegramInteraction, 'target_model') and TelegramInteraction.target_model:
-                self.target_model = TelegramInteraction.target_model
+            import IKPaster_Solution.IKPaster.ConsoleInteraction as ConsoleInteraction
+            if hasattr(ConsoleInteraction, 'target_model') and ConsoleInteraction.target_model:
+                self.target_model = ConsoleInteraction.target_model
                 return self.target_model
         except:
             pass
@@ -75,8 +75,8 @@ class DataManager:
             
             # Also update TelegramInteraction for backward compatibility
             try:
-                import TelegramInteraction
-                TelegramInteraction.target_descriptions = descriptions
+                import IKPaster_Solution.IKPaster.ConsoleInteraction as ConsoleInteraction
+                ConsoleInteraction.target_descriptions = descriptions
             except Exception as e:
                 logger.error(f"Error updating TelegramInteraction: {e}")
     
@@ -89,9 +89,9 @@ class DataManager:
                 
             # Otherwise try to get from TelegramInteraction
             try:
-                import TelegramInteraction
-                if hasattr(TelegramInteraction, 'target_descriptions') and TelegramInteraction.target_descriptions:
-                    self.target_descriptions = TelegramInteraction.target_descriptions
+                import IKPaster_Solution.IKPaster.ConsoleInteraction as ConsoleInteraction
+                if hasattr(ConsoleInteraction, 'target_descriptions') and ConsoleInteraction.target_descriptions:
+                    self.target_descriptions = ConsoleInteraction.target_descriptions
                     return self.target_descriptions.copy()
             except:
                 pass
@@ -114,10 +114,10 @@ class DataManager:
             
             # Also clear TelegramInteraction for backward compatibility
             try:
-                import TelegramInteraction
-                TelegramInteraction.target_descriptions = {}
-                TelegramInteraction.target_model = None
-                TelegramInteraction.example_model = None
+                import IKPaster_Solution.IKPaster.ConsoleInteraction as ConsoleInteraction
+                ConsoleInteraction.target_descriptions = {}
+                ConsoleInteraction.target_model = None
+                ConsoleInteraction.example_model = None
             except:
                 pass
         

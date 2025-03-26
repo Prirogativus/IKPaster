@@ -1,5 +1,7 @@
 import time
 import logging
+import os
+import json
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -10,16 +12,55 @@ from selenium.webdriver.common.keys import Keys
 import TelegramInteraction
 from DataManager import data_manager
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("publisher.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+def setup_logger():
+    """Configure logging based on the instance configuration."""
+    try:
+        # Load configuration
+        with open("config.json", "r") as f:
+            config = json.load(f)
+        
+        instance_id = config.get("instance_id", 0)
+        log_dir = config.get("log_dir", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        log_file = os.path.join(log_dir, "publisher.log")
+        
+        # Set up logging
+        logger = logging.getLogger("publisher")
+        logger.setLevel(logging.INFO)
+        
+        # Remove any existing handlers
+        for handler in logger.handlers[:]:
+            logger.removeHandler(handler)
+        
+        # Add file handler
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(logging.Formatter(f'[Instance {instance_id}] %(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+        
+        # Add console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter(f'[Instance {instance_id}] %(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(console_handler)
+        
+        return logger
+        
+    except Exception as e:
+        # Fallback logging if config fails
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler("publisher.log"),
+                logging.StreamHandler()
+            ]
+        )
+        logger = logging.getLogger("publisher")
+        logger.error(f"Error setting up logger: {e}")
+        return logger
+
+# Global logger instance
+logger = setup_logger()
 
 # URLs - modify these if the admin URLs change
 URLS = {
@@ -55,16 +96,37 @@ class ContentPublisher:
     A tool for publishing content to a Django admin site with Select2 dropdown support.
     Uses DataManager for data exchange with other modules.
     """
-    def __init__(self, username, password):
+    def __init__(self, username=None, password=None):
         """Set up the publisher with login credentials."""
-        self.username = username
-        self.password = password
+        # Try to load from config
+        try:
+            with open("config.json", "r") as f:
+                config = json.load(f)
+            
+            self.instance_id = config.get("instance_id", 0)
+            
+            # Get credentials from config if not provided
+            if username is None or password is None:
+                credentials = config.get("admin_credentials", {})
+                self.username = username or credentials.get("username", "Istomin")
+                self.password = password or credentials.get("password", "VnXJ7i47n4tjWj&g")
+            else:
+                self.username = username
+                self.password = password
+                
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
+            # Default values
+            self.instance_id = 0
+            self.username = username or "Istomin"
+            self.password = password or "VnXJ7i47n4tjWj&g"
+            
         self.urls = URLS
         self.elements = ELEMENTS
         self.driver = None
         self.target_device = None
         self.skip_list = []  # Items to skip after multiple failures
-        logger.info("ContentPublisher initialized")
+        logger.info(f"ContentPublisher initialized for instance {self.instance_id}")
     
     def start_browser(self):
         """Start the Chrome browser with improved stability and session handling."""
@@ -147,7 +209,260 @@ class ContentPublisher:
         except Exception as e:
             logger.error(f"Error during login: {e}")
             return False
+    def save_form(self):
+        """
+        Save the form prioritizing 'Save and add another' button.
+        Only fall back to regular 'Save' button if primary button fails.
+        """
+        try:
+            logger.info("Trying to save form")
+            time.sleep(2)  # Add delay before saving
+            
+            # Take instance-specific screenshot before saving
+            screenshot_path = f"before_save_{time.strftime('%Y%m%d-%H%M%S')}.png"
+            try:
+                # Get log directory from config
+                with open("config.json", "r") as f:
+                    config = json.load(f)
+                    log_dir = config.get("log_dir", "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    screenshot_path = os.path.join(log_dir, screenshot_path)
+            except:
+                pass
+                
+            self.driver.save_screenshot(screenshot_path)
+            
+            # First try PRIMARY save button (Save and add another)
+            primary_success = self._try_save_with_button_list(self.elements["primary_save_button"])
+            
+            # If primary method succeeded, return True
+            if primary_success:
+                return True
+                
+            # If primary method failed, try fallback (regular Save button)
+            logger.info("Primary save button failed, trying fallback Save button")
+            fallback_success = self._try_save_with_button_list(self.elements["fallback_save_button"])
+            
+            # If fallback succeeded, return True
+            if fallback_success:
+                return True
+            
+            # Last resort: Try tab navigation and Enter key
+            logger.info("Trying keyboard navigation as last resort")
+            try:
+                body = self.driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.TAB * 10)  # Try to tab to the save button
+                body.send_keys(Keys.ENTER)
+                time.sleep(3)
+                if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                    logger.info("Form saved successfully with keyboard navigation")
+                    return True
+            except:
+                logger.info("Keyboard navigation failed")
+            
+            # If we're still here, try all submit buttons as last resort
+            try:
+                all_buttons = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
+                logger.info(f"Found {len(all_buttons)} submit buttons on page")
+                
+                for i, btn in enumerate(all_buttons):
+                    value = btn.get_attribute('value')
+                    # Skip buttons we've already tried
+                    if value in ["Save and add another", "Save"]:
+                        continue
+                        
+                    logger.info(f"Trying button {i+1}: value='{value}'")
+                    try:
+                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                        time.sleep(1)
+                        self.driver.execute_script("arguments[0].click();", btn)
+                        time.sleep(3)
+                        if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                            logger.info(f"Form saved successfully with button {i+1}")
+                            return True
+                    except:
+                        continue
+            except Exception as e:
+                logger.info(f"Error trying all buttons: {e}")
+                
+            # If we get here, all approaches failed
+            logger.error("All save approaches failed")
+            
+            # Instance-specific screenshot path
+            error_screenshot_path = f"save_failed_{time.strftime('%Y%m%d-%H%M%S')}.png"
+            try:
+                with open("config.json", "r") as f:
+                    config = json.load(f)
+                    log_dir = config.get("log_dir", "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    error_screenshot_path = os.path.join(log_dir, error_screenshot_path)
+            except:
+                pass
+                
+            self.driver.save_screenshot(error_screenshot_path)
+            return False
+                
+        except Exception as e:
+            logger.error(f"Error in save_form method: {e}")
+            
+            # Instance-specific screenshot path
+            error_screenshot_path = f"save_error_{time.strftime('%Y%m%d-%H%M%S')}.png"
+            try:
+                with open("config.json", "r") as f:
+                    config = json.load(f)
+                    log_dir = config.get("log_dir", "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    error_screenshot_path = os.path.join(log_dir, error_screenshot_path)
+            except:
+                pass
+                
+            self.driver.save_screenshot(error_screenshot_path)
+            return False
     
+    def _try_save_with_button_list(self, button_locators):
+        """Helper method to try multiple approaches with a list of button locators."""
+        for button_locator in button_locators:
+            try:
+                logger.info(f"Trying save button: {button_locator}")
+                save_button = self.wait_for_element(button_locator)
+                
+                if not save_button:
+                    logger.info(f"Button not found: {button_locator}")
+                    continue
+                
+                # Take screenshot of the found button
+                screenshot_path = f"button_found_{time.strftime('%Y%m%d-%H%M%S')}.png"
+                try:
+                    # Get log directory from config
+                    with open("config.json", "r") as f:
+                        config = json.load(f)
+                        log_dir = config.get("log_dir", "logs")
+                        os.makedirs(log_dir, exist_ok=True)
+                        screenshot_path = os.path.join(log_dir, screenshot_path)
+                except:
+                    pass
+                    
+                self.driver.save_screenshot(screenshot_path)
+                
+                # Approach 1: Direct click
+                try:
+                    logger.info("Trying direct click")
+                    save_button.click()
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with direct click")
+                        return True
+                except ElementClickInterceptedException:
+                    logger.info("Direct click intercepted, trying alternatives")
+                except Exception as e:
+                    logger.info(f"Direct click failed: {e}")
+                
+                # Approach 2: JavaScript click
+                try:
+                    logger.info("Trying JavaScript click")
+                    self.driver.execute_script("arguments[0].click();", save_button)
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with JavaScript click")
+                        return True
+                except Exception as e:
+                    logger.info(f"JavaScript click failed: {e}")
+                
+                # Approach 3: Scroll into view first, then JS click
+                try:
+                    logger.info("Trying scroll then JavaScript click")
+                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", save_button)
+                    time.sleep(1)
+                    self.driver.execute_script("arguments[0].click();", save_button)
+                    time.sleep(3)
+                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
+                        logger.info("Form saved successfully with scroll+JS click")
+                        return True
+                except Exception as e:
+                    logger.info(f"Scroll+JS click failed: {e}")
+                    
+            except Exception as e:
+                logger.info(f"Error with button {button_locator}: {e}")
+                continue
+                
+        # If we reach here, all approaches with this list of buttons failed
+        return False
+    
+    def publish_description(self, description_name, content):
+        """Publish a single description without content size management."""
+        try:
+            # Skip certain items if needed
+            if description_name in self.skip_list:
+                logger.info(f"Skipping '{description_name}' as it's in the skip list")
+                return False
+
+            logger.info(f"Publishing description: '{description_name}'")
+            
+            # Get the target device from DataManager if not already set
+            if not self.target_device:
+                self.target_device = data_manager.get_target_model()
+                # Normalize the case for "PRO" to "Pro"
+                if "PRO" in self.target_device:
+                    self.target_device = self.target_device.replace("PRO", "Pro")
+                logger.info(f"Using target device from DataManager: {self.target_device}")
+            
+            if not self.target_device:
+                logger.error("No target device available. Ensure target_model is set in DataManager.")
+                return False
+            
+            # Add an initial delay to pace requests
+            time.sleep(2)
+
+            # Navigate to add description page
+            self.driver.get(self.urls["add_description"])
+            time.sleep(5)  # Increased wait time for page load
+            
+            # Select the description name from dropdown
+            if not self.select_select2_option("id_other_name", description_name):
+                logger.error(f"Failed to select '{description_name}' from dropdown")
+                return False
+            
+            # Add a delay between dropdown selections
+            time.sleep(3)
+            
+            # Select the device from dropdown
+            if not self.select_select2_option("id_reset_info", self.target_device):
+                logger.error(f"Failed to select '{self.target_device}' from dropdown")
+                return False
+            
+            # Add another delay before content entry
+            time.sleep(3)
+            
+            # Enter content
+            if not self.enter_editor_content(content):
+                return False
+            
+            # Add delay before saving
+            time.sleep(3)
+            
+            # Save the form using our enhanced save method
+            if not self.save_form():
+                return False
+            
+            logger.info(f"Successfully published '{description_name}'")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error publishing description: {e}")
+            
+            # Instance-specific screenshot path
+            error_screenshot_path = f"error_{time.strftime('%Y%m%d-%H%M%S')}.png"
+            try:
+                with open("config.json", "r") as f:
+                    config = json.load(f)
+                    log_dir = config.get("log_dir", "logs")
+                    os.makedirs(log_dir, exist_ok=True)
+                    error_screenshot_path = os.path.join(log_dir, error_screenshot_path)
+            except:
+                pass
+                
+            self.driver.save_screenshot(error_screenshot_path)
+            return False
     def select_select2_option(self, select_id, option_text):
         """
         Select an option from a Select2 dropdown with case-insensitive matching.
@@ -356,211 +671,13 @@ class ContentPublisher:
         except Exception as e:
             logger.error(f"Error entering editor content: {e}")
             return False
-    
-    def save_form(self):
-        """
-        Save the form prioritizing 'Save and add another' button.
-        Only fall back to regular 'Save' button if primary button fails.
-        """
-        try:
-            logger.info("Trying to save form")
-            time.sleep(2)  # Add delay before saving
-            
-            # Take screenshot before saving
-            self.driver.save_screenshot(f"before_save_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            
-            # First try PRIMARY save button (Save and add another)
-            primary_success = self._try_save_with_button_list(self.elements["primary_save_button"])
-            
-            # If primary method succeeded, return True
-            if primary_success:
-                return True
-                
-            # If primary method failed, try fallback (regular Save button)
-            logger.info("Primary save button failed, trying fallback Save button")
-            fallback_success = self._try_save_with_button_list(self.elements["fallback_save_button"])
-            
-            # If fallback succeeded, return True
-            if fallback_success:
-                return True
-            
-            # Last resort: Try tab navigation and Enter key
-            logger.info("Trying keyboard navigation as last resort")
-            try:
-                body = self.driver.find_element(By.TAG_NAME, "body")
-                body.send_keys(Keys.TAB * 10)  # Try to tab to the save button
-                body.send_keys(Keys.ENTER)
-                time.sleep(3)
-                if "add" in self.driver.current_url or "change" in self.driver.current_url:
-                    logger.info("Form saved successfully with keyboard navigation")
-                    return True
-            except:
-                logger.info("Keyboard navigation failed")
-            
-            # If we're still here, try all submit buttons as last resort
-            try:
-                all_buttons = self.driver.find_elements(By.CSS_SELECTOR, "input[type='submit']")
-                logger.info(f"Found {len(all_buttons)} submit buttons on page")
-                
-                for i, btn in enumerate(all_buttons):
-                    value = btn.get_attribute('value')
-                    # Skip buttons we've already tried
-                    if value in ["Save and add another", "Save"]:
-                        continue
-                        
-                    logger.info(f"Trying button {i+1}: value='{value}'")
-                    try:
-                        self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
-                        time.sleep(1)
-                        self.driver.execute_script("arguments[0].click();", btn)
-                        time.sleep(3)
-                        if "add" in self.driver.current_url or "change" in self.driver.current_url:
-                            logger.info(f"Form saved successfully with button {i+1}")
-                            return True
-                    except:
-                        continue
-            except Exception as e:
-                logger.info(f"Error trying all buttons: {e}")
-                
-            # If we get here, all approaches failed
-            logger.error("All save approaches failed")
-            self.driver.save_screenshot(f"save_failed_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            return False
-                
-        except Exception as e:
-            logger.error(f"Error in save_form method: {e}")
-            self.driver.save_screenshot(f"save_error_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            return False
-            
-    def _try_save_with_button_list(self, button_locators):
-        """Helper method to try multiple approaches with a list of button locators."""
-        for button_locator in button_locators:
-            try:
-                logger.info(f"Trying save button: {button_locator}")
-                save_button = self.wait_for_element(button_locator)
-                
-                if not save_button:
-                    logger.info(f"Button not found: {button_locator}")
-                    continue
-                
-                # Take screenshot of the found button
-                self.driver.save_screenshot(f"button_found_{time.strftime('%Y%m%d-%H%M%S')}.png")
-                
-                # Approach 1: Direct click
-                try:
-                    logger.info("Trying direct click")
-                    save_button.click()
-                    time.sleep(3)
-                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
-                        logger.info("Form saved successfully with direct click")
-                        return True
-                except ElementClickInterceptedException:
-                    logger.info("Direct click intercepted, trying alternatives")
-                except Exception as e:
-                    logger.info(f"Direct click failed: {e}")
-                
-                # Approach 2: JavaScript click
-                try:
-                    logger.info("Trying JavaScript click")
-                    self.driver.execute_script("arguments[0].click();", save_button)
-                    time.sleep(3)
-                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
-                        logger.info("Form saved successfully with JavaScript click")
-                        return True
-                except Exception as e:
-                    logger.info(f"JavaScript click failed: {e}")
-                
-                # Approach 3: Scroll into view first, then JS click
-                try:
-                    logger.info("Trying scroll then JavaScript click")
-                    self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", save_button)
-                    time.sleep(1)
-                    self.driver.execute_script("arguments[0].click();", save_button)
-                    time.sleep(3)
-                    if "add" in self.driver.current_url or "change" in self.driver.current_url:
-                        logger.info("Form saved successfully with scroll+JS click")
-                        return True
-                except Exception as e:
-                    logger.info(f"Scroll+JS click failed: {e}")
-                    
-            except Exception as e:
-                logger.info(f"Error with button {button_locator}: {e}")
-                continue
-                
-        # If we reach here, all approaches with this list of buttons failed
-        return False
-    
-    def publish_description(self, description_name, content):
-        """Publish a single description without content size management."""
-        try:
-            # Skip certain items if needed
-            if description_name in self.skip_list:
-                logger.info(f"Skipping '{description_name}' as it's in the skip list")
-                return False
-
-            logger.info(f"Publishing description: '{description_name}'")
-            
-            # Get the target device from DataManager if not already set
-            if not self.target_device:
-                self.target_device = data_manager.get_target_model()
-                # Normalize the case for "PRO" to "Pro"
-                if "PRO" in self.target_device:
-                    self.target_device = self.target_device.replace("PRO", "Pro")
-                logger.info(f"Using target device from DataManager: {self.target_device}")
-            
-            if not self.target_device:
-                logger.error("No target device available. Ensure target_model is set in DataManager.")
-                return False
-            
-            # Add an initial delay to pace requests
-            time.sleep(2)
-
-            # Navigate to add description page
-            self.driver.get(self.urls["add_description"])
-            time.sleep(5)  # Increased wait time for page load
-            
-            # Select the description name from dropdown
-            if not self.select_select2_option("id_other_name", description_name):
-                logger.error(f"Failed to select '{description_name}' from dropdown")
-                return False
-            
-            # Add a delay between dropdown selections
-            time.sleep(3)
-            
-            # Select the device from dropdown
-            if not self.select_select2_option("id_reset_info", self.target_device):
-                logger.error(f"Failed to select '{self.target_device}' from dropdown")
-                return False
-            
-            # Add another delay before content entry
-            time.sleep(3)
-            
-            # Enter content
-            if not self.enter_editor_content(content):
-                return False
-            
-            # Add delay before saving
-            time.sleep(3)
-            
-            # Save the form using our enhanced save method
-            if not self.save_form():
-                return False
-            
-            logger.info(f"Successfully published '{description_name}'")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error publishing description: {e}")
-            self.driver.save_screenshot(f"error_{time.strftime('%Y%m%d-%H%M%S')}.png")
-            return False
-    
     def run(self):
         """
         Run the complete publishing process using data from DataManager.
         Implements batch processing to reduce server load.
         """
         try:
-            logger.info("Starting content publisher")
+            logger.info(f"Starting content publisher for instance {self.instance_id}")
             
             # Get data from DataManager
             self.target_device = data_manager.get_target_model()
